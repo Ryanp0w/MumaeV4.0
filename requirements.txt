@@ -5,3 +5,4 @@ plotly
 gspread
 google-auth
 requests
+extra-streamlit-components
