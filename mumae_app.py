@@ -208,12 +208,12 @@ def phase_label(p):
 # ==========================================
 # yfinance
 # ==========================================
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_close(ticker):
-    """현재가 우선 (fast_info), 안 되면 직전 종가"""
+    """현재가/종가: yfinance fast_info → history → stooq 순"""
+    # 1. yfinance fast_info (실시간 우선)
     try:
         t = yf.Ticker(ticker)
-        # 1. fast_info의 last_price (장중엔 실시간, 장후엔 직전 종가)
         try:
             fi = t.fast_info
             p = fi.get('last_price') if hasattr(fi, 'get') else getattr(fi, 'last_price', None)
@@ -221,10 +221,23 @@ def fetch_close(ticker):
                 return float(p)
         except Exception:
             pass
-        # 2. history fallback
+        # 2. yfinance history
         d = t.history(period="5d")
         if not d.empty:
             return float(d['Close'].iloc[-1])
+    except Exception:
+        pass
+    # 3. stooq fallback (무료, 키 불필요)
+    try:
+        url = f"https://stooq.com/q/l/?s={ticker.lower()}.us&f=sd2t2ohlcv&h&e=csv"
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            lines = r.text.strip().split('\n')
+            if len(lines) >= 2:
+                # CSV: Symbol,Date,Time,Open,High,Low,Close,Volume
+                parts = lines[1].split(',')
+                if len(parts) >= 7 and parts[6] not in ('N/D', ''):
+                    return float(parts[6])
     except Exception:
         pass
     return None
