@@ -1,5 +1,5 @@
 """
-무매v4.0 by Ryan
+무매v4.0 by ryanp0w
 - 구글 시트 백엔드 + URL 사용자 인증 (?user=xxx)
 - 4탭 (포트폴리오/매매이력/정산이력/슬롯 관리)
 - 슬롯 없을 때 SOXL 종가 + 환율 표시
@@ -15,7 +15,7 @@ import gspread
 from google.oauth2 import service_account
 
 st.set_page_config(
-    page_title="무매v4.0 by Ryan",
+    page_title="무매v4.0 by ryanp0w",
     page_icon="🚀",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -420,7 +420,7 @@ def render_sidebar():
 # 헤더
 # ==========================================
 def render_header():
-    st.markdown("# 🚀 무매v4.0 by Ryan")
+    st.markdown("# 🚀 무매v4.0 by ryanp0w")
     acts = active_slots()
 
     if not acts:
@@ -458,6 +458,7 @@ def render_header():
 # 탭 1: 포트폴리오
 # ==========================================
 def tab_portfolio(s):
+    # === 계산 ===
     h, a, cash, _, _ = calc_holdings(s['transactions'], s['capital'])
     cls = fetch_close(s['ticker'])
     realized = calc_realized(s['transactions'])
@@ -468,42 +469,14 @@ def tab_portfolio(s):
     total = cash + val
     total_pct = ((total - s['capital']) / s['capital'] * 100) if s['capital'] else 0
 
-    pcolor = '#22c55e' if total_pct >= 0 else '#ef4444'
-    big_number("투자 수익률", f"{total_pct:+.2f}%", pcolor)
-    st.markdown("<br>", unsafe_allow_html=True)
-    big_number("투자 손익", f"{total_profit:+.2f} USD", pcolor)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
     T, spl = s['T'], s['split']
     one_buy = calc_one_buy(cash, T, spl)
-    cc = st.columns(2)
-    cc[0].metric("1회 매수금", f"${one_buy:.0f}")
-    cc[1].metric("운용 종목수", f"{len(active_slots())}개")
-
-    st.divider()
-    st.subheader(f"📌 {s['name']}")
     phase = get_phase(T, spl)
     mode = s.get('mode', 'normal')
-    cc = st.columns(2)
-    if mode == 'reverse':
-        cc[0].metric("모드", "🔄 리버스")
-    else:
-        cc[0].metric("단계", phase_label(phase))
-    cc[1].metric("진행도", f"{T:.2f} / {spl}T")
-    cc = st.columns(2)
-    cc[0].metric("보유", f"{h}주")
-    cc[1].metric("평단", f"${a:.2f}" if a else "-")
-    cc = st.columns(2)
-    cc[0].metric("현재가", f"${cls:.2f}" if cls else "-")
-    cc[1].metric("잔금", f"${cash:,.0f}")
-
-    st.divider()
     star_pct = calc_star_pct(T, s['ticker'], spl)
     star_price = a * (1 + star_pct / 100) if a else 0
 
-    # 모드 표시
-    mode = s.get('mode', 'normal')
+    # === 1. 오늘의 주문 (최상단) ===
     if mode == 'reverse':
         st.subheader("🔄 리버스 모드 — 오늘의 주문")
         render_reverse_orders(s, h, a, cash, cls)
@@ -543,6 +516,36 @@ def tab_portfolio(s):
                 st.markdown("**💰 매도**")
                 st.markdown(f"- ★ LOC `${star_price:.2f}` · **{quarter}주**")
                 st.markdown(f"- {spct}% 지정가 `${target_sell}` · **{rest}주**")
+
+    st.divider()
+
+    # === 2. 투자 수익률 / 손익 ===
+    pcolor = '#22c55e' if total_pct >= 0 else '#ef4444'
+    big_number("투자 수익률", f"{total_pct:+.2f}%", pcolor)
+    st.markdown("<br>", unsafe_allow_html=True)
+    big_number("투자 손익", f"{total_profit:+.2f} USD", pcolor)
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # === 3. 1회 매수금 / 운용 종목수 ===
+    cc = st.columns(2)
+    cc[0].metric("1회 매수금", f"${one_buy:.0f}")
+    cc[1].metric("운용 종목수", f"{len(active_slots())}개")
+
+    # === 4. 슬롯 상세 ===
+    st.divider()
+    st.subheader(f"📌 {s['name']}")
+    cc = st.columns(2)
+    if mode == 'reverse':
+        cc[0].metric("모드", "🔄 리버스")
+    else:
+        cc[0].metric("단계", phase_label(phase))
+    cc[1].metric("진행도", f"{T:.2f} / {spl}T")
+    cc = st.columns(2)
+    cc[0].metric("보유", f"{h}주")
+    cc[1].metric("평단", f"${a:.2f}" if a else "-")
+    cc = st.columns(2)
+    cc[0].metric("현재가", f"${cls:.2f}" if cls else "-")
+    cc[1].metric("잔금", f"${cash:,.0f}")
 
 def render_reverse_orders(s, h, a, cash, cls):
     """리버스 모드 주문 가이드"""
