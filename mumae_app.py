@@ -5,7 +5,6 @@
 - 슬롯 없을 때 SOXL 종가 + 환율 표시
 """
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import yfinance as yf
 import requests
@@ -14,6 +13,7 @@ import json
 import uuid
 import gspread
 from google.oauth2 import service_account
+import extra_streamlit_components as stx
 
 st.set_page_config(
     page_title="무매v4.0 by ryanp0w",
@@ -23,40 +23,40 @@ st.set_page_config(
 )
 
 # ==========================================
-# URL 사용자 인증 (+ localStorage 자동 기억)
+# URL 사용자 인증 (+ 쿠키 자동 기억)
 # ==========================================
+cookie_manager = stx.CookieManager(key='mumae_cookie_manager')
+
 query_params = st.query_params
 user = query_params.get('user', None)
 
+# URL에 user 있으면 → 쿠키에 저장 (다음 PWA/접속 시 자동 사용)
 if user:
-    # URL에 user 있음 → localStorage에 저장 (다음 방문 시 사용)
-    components.html(f"""
-    <script>
-      try {{
-        localStorage.setItem('mumae_user', {json.dumps(user)});
-      }} catch(e) {{ console.log('Storage error:', e); }}
-    </script>
-    """, height=0, width=0)
-else:
-    # URL에 user 없음 → localStorage에서 가져와 redirect 시도
-    components.html("""
-    <script>
-      try {
-        const saved = localStorage.getItem('mumae_user');
-        if (saved && saved.length >= 4) {
-          const parentLoc = window.parent.location;
-          const url = new URL(parentLoc.href);
-          url.searchParams.set('user', saved);
-          parentLoc.replace(url.toString());
-        }
-      } catch(e) { console.log('Storage error:', e); }
-    </script>
-    """, height=0, width=0)
+    cookie_manager.set('mumae_user', user, key='save_url_cookie')
 
+# URL 없으면 → 쿠키에서 가져와 redirect 시도
 if not user:
-    st.title("🔒 접근")
-    st.markdown("URL에 `?user=본인코드` 가 필요합니다.")
-    st.caption("저장된 코드 확인 중... 2초 후에도 이 화면이 보이면 ?user=본인코드 로 다시 접속하세요.")
+    saved = cookie_manager.get('mumae_user')
+    if saved and isinstance(saved, str) and 4 <= len(saved) <= 50 and saved.replace('_', '').isalnum():
+        st.query_params['user'] = saved
+        st.rerun()
+
+# 그래도 user 없으면 로그인 폼
+if not user:
+    st.markdown("# 🚀 무매v4.0 by ryanp0w")
+    st.markdown("### 🔐 사용자 코드 입력")
+    with st.form("login_form"):
+        code = st.text_input("사용자 코드", placeholder="예: 23xfkdvc")
+        submitted = st.form_submit_button("접속", width='stretch')
+        if submitted:
+            code = code.strip()
+            if code and code.replace('_', '').isalnum() and 4 <= len(code) <= 50:
+                cookie_manager.set('mumae_user', code, key='save_login_cookie')
+                st.query_params['user'] = code
+                st.rerun()
+            else:
+                st.error("4-50자 영문/숫자/_ 만 사용 가능")
+    st.caption("💡 한 번 접속하면 쿠키에 저장돼서 다음부터 자동 인증")
     st.stop()
 
 if not user.replace('_', '').isalnum() or not (4 <= len(user) <= 50):
