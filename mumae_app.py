@@ -49,8 +49,9 @@ SCOPES = [
 ]
 
 SLOT_HEADERS = ['id', 'name', 'ticker', 'capital', 'split', 'target_profit',
-                'T', 'status', 'created_at', 'completed_at']
-TX_HEADERS = ['slot_id', 'date', 'type', 'price', 'qty']
+                'T', 'mode', 'reverse_entered_at', 'manual_reverse_star',
+                'status', 'created_at', 'completed_at']
+TX_HEADERS = ['slot_id', 'date', 'type', 'price', 'qty', 'mode']
 
 @st.cache_resource(show_spinner=False)
 def get_spreadsheet():
@@ -89,6 +90,9 @@ def load_user_data(u):
             'split': int(r.get('split') or 40),
             'target_profit': float(r.get('target_profit') or 10),
             'T': float(r.get('T') or 0),
+            'mode': str(r.get('mode') or 'normal'),
+            'reverse_entered_at': (str(r['reverse_entered_at']) if r.get('reverse_entered_at') else None),
+            'manual_reverse_star': (float(r['manual_reverse_star']) if r.get('manual_reverse_star') else None),
             'status': str(r.get('status', 'active')),
             'created_at': str(r.get('created_at', '')),
             'completed_at': (str(r['completed_at']) if r.get('completed_at') else None),
@@ -103,6 +107,7 @@ def load_user_data(u):
                     'type': str(r['type']),
                     'price': float(r['price']),
                     'qty': int(r['qty']),
+                    'mode': str(r.get('mode') or 'normal'),
                 })
             except Exception:
                 continue
@@ -117,7 +122,10 @@ def save_user_data(u, slots):
         slot_rows.append([
             s['id'], s['name'], s['ticker'],
             s['capital'], s['split'], s['target_profit'],
-            s['T'], s['status'], s['created_at'],
+            s['T'], s.get('mode', 'normal'),
+            s.get('reverse_entered_at') or '',
+            s.get('manual_reverse_star') or '',
+            s['status'], s['created_at'],
             s.get('completed_at') or '',
         ])
     slots_ws.clear()
@@ -128,7 +136,7 @@ def save_user_data(u, slots):
         for t in s['transactions']:
             tx_rows.append([
                 s['id'], t['date'], t['type'],
-                t['price'], t['qty'],
+                t['price'], t['qty'], t.get('mode', 'normal'),
             ])
     txs_ws.clear()
     txs_ws.update(values=tx_rows, range_name='A1')
@@ -206,6 +214,61 @@ def phase_label(p):
     return {'early': '전반전', 'late': '후반전', 'sojin': '소진'}[p]
 
 # ==========================================
+# 리버스 모드 헬퍼
+# ==========================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_reverse_star(ticker):
+    """별지점 = 직전 5거래일 종가 평균"""
+    try:
+        t = yf.Ticker(ticker)
+        d = t.history(period="10d")
+        if not d.empty and len(d) >= 5:
+            return float(d['Close'].iloc[-5:].mean())
+    except Exception:
+        pass
+    return None
+
+def calc_reverse_sell_qty(holdings, split):
+    """리버스 매도수량 = 직전보유의 1/10(20분할) or 1/20(40분할), 내림"""
+    divisor = 10 if split == 20 else 20
+    return holdings // divisor
+
+def is_first_reverse_sell(slot):
+    """최근 리버스 진입 이후 첫 매도가 아직 없는지"""
+    entered_at = slot.get('reverse_entered_at')
+    # 진입 시점 없으면 (구버전 데이터 호환) 전체 리버스 매도 이력으로 판단
+    if not entered_at:
+        for t in slot['transactions']:
+            if t.get('mode') == 'reverse' and t['type'] == 'sell':
+                return False
+        return True
+    # 진입 시점 이후의 리버스 매도만 카운트
+    for t in slot['transactions']:
+        if t.get('mode') == 'reverse' and t['type'] == 'sell':
+            if t['date'] >= entered_at:
+                return False
+    return True
+
+def check_reverse_exit(slot, close_price):
+    """종료조건: 종가 > 평단 × (1 - X%/100), X=15(TQQQ) or 20(SOXL)"""
+    if not close_price:
+        return False, None
+    h, a, _, _, _ = calc_holdings(slot['transactions'], slot['capital'])
+    if not a:
+        return False, None
+    pct = 15 if slot['ticker'] == 'TQQQ' else 20
+    threshold = a * (1 - pct / 100)
+    return close_price > threshold, threshold
+
+def calc_reverse_T_buy(T, split):
+    """리버스 매수시 T값: T + (split-T)×0.25"""
+    return T + (split - T) * 0.25
+
+def calc_reverse_T_sell(T, split):
+    """리버스 매도시 T값: T×0.9 (20분할) or T×0.95 (40분할)"""
+    return T * (0.9 if split == 20 else 0.95)
+
+# ==========================================
 # yfinance
 # ==========================================
 @st.cache_data(ttl=600, show_spinner=False)
@@ -278,6 +341,9 @@ def create_slot(name, ticker, capital, split, target_profit):
         'capital': float(capital), 'split': int(split),
         'target_profit': float(target_profit),
         'T': 0.0, 'transactions': [],
+        'mode': 'normal',
+        'reverse_entered_at': None,
+        'manual_reverse_star': None,
         'status': 'active',
         'created_at': str(date.today()),
         'completed_at': None,
@@ -418,8 +484,12 @@ def tab_portfolio(s):
     st.divider()
     st.subheader(f"📌 {s['name']}")
     phase = get_phase(T, spl)
+    mode = s.get('mode', 'normal')
     cc = st.columns(2)
-    cc[0].metric("단계", phase_label(phase))
+    if mode == 'reverse':
+        cc[0].metric("모드", "🔄 리버스")
+    else:
+        cc[0].metric("단계", phase_label(phase))
     cc[1].metric("진행도", f"{T:.2f} / {spl}T")
     cc = st.columns(2)
     cc[0].metric("보유", f"{h}주")
@@ -432,47 +502,107 @@ def tab_portfolio(s):
     star_pct = calc_star_pct(T, s['ticker'], spl)
     star_price = a * (1 + star_pct / 100) if a else 0
 
-    st.subheader("🌙 오늘의 주문")
-    if h == 0:
-        with st.container(border=True):
-            st.markdown("**🚀 처음 매수**")
-            if cls:
-                big = cls * 1.12
-                qty = int(one_buy // big) if big > 0 else 0
-                st.markdown(f"- LOC `${big:.2f}` · **{qty}주**")
-                st.caption(f"종가 ${cls:.2f}, +12%")
-            else:
-                st.warning("종가 로드 실패. 수동으로 +10~15% 위에 LOC")
+    # 모드 표시
+    mode = s.get('mode', 'normal')
+    if mode == 'reverse':
+        st.subheader("🔄 리버스 모드 — 오늘의 주문")
+        render_reverse_orders(s, h, a, cash, cls)
     else:
-        bp = round(star_price - 0.01, 2)
-        spct = 15 if s['ticker'] == 'TQQQ' else 20
-        target_sell = round(a * (1 + spct / 100), 2)
-        quarter = h // 4
-        rest = h - quarter
-        with st.container(border=True):
-            st.markdown(f"**🛒 매수 ({phase_label(phase)})**")
-            if phase == 'early':
-                half = one_buy / 2
-                qs = int(half // bp) if bp > 0 else 0
-                qa = int(half // a) if a > 0 else 0
-                st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
-                st.markdown(f"- 평단 LOC `${a:.2f}` · **{qa}주**")
-            elif phase == 'late':
-                qs = int(one_buy // bp) if bp > 0 else 0
-                st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
+        st.subheader("🌙 오늘의 주문")
+        if h == 0:
+            with st.container(border=True):
+                st.markdown("**🚀 처음 매수**")
+                if cls:
+                    big = cls * 1.12
+                    qty = int(one_buy // big) if big > 0 else 0
+                    st.markdown(f"- LOC `${big:.2f}` · **{qty}주**")
+                    st.caption(f"종가 ${cls:.2f}, +12%")
+                else:
+                    st.warning("종가 로드 실패. 수동으로 +10~15% 위에 LOC")
+        else:
+            bp = round(star_price - 0.01, 2)
+            spct = 15 if s['ticker'] == 'TQQQ' else 20
+            target_sell = round(a * (1 + spct / 100), 2)
+            quarter = h // 4
+            rest = h - quarter
+            with st.container(border=True):
+                st.markdown(f"**🛒 매수 ({phase_label(phase)})**")
+                if phase == 'early':
+                    half = one_buy / 2
+                    qs = int(half // bp) if bp > 0 else 0
+                    qa = int(half // a) if a > 0 else 0
+                    st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
+                    st.markdown(f"- 평단 LOC `${a:.2f}` · **{qa}주**")
+                elif phase == 'late':
+                    qs = int(one_buy // bp) if bp > 0 else 0
+                    st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
+                else:
+                    st.error("⚠️ 소진 도달. 다음 매수 저장 시 자동 리버스 전환됩니다.")
+                st.caption(f"1회매수액 ${one_buy:.2f}")
+            with st.container(border=True):
+                st.markdown("**💰 매도**")
+                st.markdown(f"- ★ LOC `${star_price:.2f}` · **{quarter}주**")
+                st.markdown(f"- {spct}% 지정가 `${target_sell}` · **{rest}주**")
+
+def render_reverse_orders(s, h, a, cash, cls):
+    """리버스 모드 주문 가이드"""
+    # 별지점: 수동 입력값 우선, 없으면 yfinance 자동
+    star = s.get('manual_reverse_star')
+    star_source = "수동 입력"
+    if not star:
+        star = fetch_reverse_star(s['ticker'])
+        star_source = "직전 5거래일 평균 (자동)"
+
+    is_first = is_first_reverse_sell(s)
+    exit_ok, threshold = check_reverse_exit(s, cls)
+    pct = 15 if s['ticker'] == 'TQQQ' else 20
+
+    # 상태 박스
+    with st.container(border=True):
+        st.markdown("**📍 리버스 상태**")
+        if star:
+            st.markdown(f"- 별지점: `${star:.2f}` ({star_source})")
+        else:
+            st.markdown("- 별지점: 조회 실패 — 슬롯 관리 탭에서 수동 입력")
+        if a and threshold:
+            st.markdown(f"- 종료조건: 종가 > `${threshold:.2f}` (평단 -{pct}%)")
+        if exit_ok:
+            st.success("✅ 종료조건 충족! 슬롯 관리 탭에서 **일반모드 복귀** 가능")
+
+    # 매도
+    sell_qty = calc_reverse_sell_qty(h, s['split'])
+    divisor = 10 if s['split'] == 20 else 20
+    with st.container(border=True):
+        if is_first:
+            st.markdown(f"**💰 처음 매도 (MOC 무조건 매도)**")
+            st.markdown(f"- **MOC 매도** {sell_qty}주 (보유 {h}주 × 1/{divisor})")
+            st.caption("MOC = 시장가 종가매도. 무조건 체결.")
+        else:
+            st.markdown(f"**💰 매도 (별지점 위 LOC)**")
+            if star:
+                st.markdown(f"- LOC `${star:.2f}` 위 · **{sell_qty}주** (직전보유 × 1/{divisor})")
             else:
-                st.error("⚠️ 소진모드 (리버스모드 미구현)")
-            st.caption(f"1회매수액 ${one_buy:.2f}")
+                st.markdown(f"- 별지점 위에 LOC · **{sell_qty}주**")
+
+    # 매수 (첫날 제외)
+    if not is_first:
+        qbuy = cash / 4
         with st.container(border=True):
-            st.markdown("**💰 매도**")
-            st.markdown(f"- ★ LOC `${star_price:.2f}` · **{quarter}주**")
-            st.markdown(f"- {spct}% 지정가 `${target_sell}` · **{rest}주**")
+            st.markdown("**🛒 쿼터매수 (별지점 아래 LOC)**")
+            st.markdown(f"- 총 매수금: `${qbuy:.2f}` (잔금 ${cash:.2f} ÷ 4)")
+            if star:
+                st.caption(f"별지점 ${star:.2f} 아래에서 LOC 분산 매수")
+            st.caption("매수 가격대는 본인 재량으로 분산")
 
 # ==========================================
 # 탭 2: 매매이력
 # ==========================================
 def tab_history(s):
     cls = fetch_close(s['ticker'])
+    mode = s.get('mode', 'normal')
+
+    if mode == 'reverse':
+        st.info("🔄 리버스 모드 매매 입력")
 
     st.subheader("📝 체결 입력")
     btab, stab = st.tabs(["🛒 매수", "💰 매도"])
@@ -484,18 +614,36 @@ def tab_history(s):
             fq = cc[0].number_input("수량", min_value=1, value=1, step=1, key=f"bq_{s['id']}")
             fp = cc[1].number_input("가격", min_value=0.01,
                                      value=float(cls) if cls else 50.0, step=0.01, key=f"bp_{s['id']}")
-            tc = st.radio("T값 변화", ["+1 (1회 매수)", "+0.5 (절반 매수)"], key=f"btc_{s['id']}")
-            td = 1.0 if "+1" in tc else 0.5
-            new_T = s['T'] + td
-            st.caption(f"T: {s['T']:.3f} → **{new_T:.3f}**")
+
+            if mode == 'reverse':
+                # 리버스 매수: T + (split-T)×0.25 (한 옵션만)
+                new_T = calc_reverse_T_buy(s['T'], s['split'])
+                st.caption(f"리버스 쿼터매수: T {s['T']:.3f} → **{new_T:.3f}**")
+                tx_mode = 'reverse'
+            else:
+                tc = st.radio("T값 변화", ["+1 (1회 매수)", "+0.5 (절반 매수)"], key=f"btc_{s['id']}")
+                td = 1.0 if "+1" in tc else 0.5
+                new_T = s['T'] + td
+                st.caption(f"T: {s['T']:.3f} → **{new_T:.3f}**")
+                tx_mode = 'normal'
+
             if st.form_submit_button("💾 매수 저장", width='stretch'):
                 s['transactions'].append({
                     'date': str(fd), 'type': 'buy',
                     'price': float(fp), 'qty': int(fq),
+                    'mode': tx_mode,
                 })
                 s['T'] = new_T
-                persist()
-                st.success("매수 저장됨")
+                # 일반→리버스 자동 전환
+                if mode == 'normal' and new_T > s['split'] - 1:
+                    s['mode'] = 'reverse'
+                    s['reverse_entered_at'] = str(date.today())
+                    s['manual_reverse_star'] = None  # 새 리버스 진입이니 별지점 초기화
+                    persist()
+                    st.warning(f"🔄 T값이 {s['split']-1}을 초과해 **리버스 모드로 자동 전환**됨")
+                else:
+                    persist()
+                    st.success("매수 저장됨")
                 st.rerun()
 
     with stab:
@@ -506,21 +654,37 @@ def tab_history(s):
             fq = cc[0].number_input("수량", min_value=1, value=1, step=1, key=f"sq_{s['id']}")
             fp = cc[1].number_input("가격", min_value=0.01,
                                      value=float(cls) if cls else 50.0, step=0.01, key=f"sp_{s['id']}")
-            stp = st.radio("T값 변화",
-                           ["쿼터매도 (×0.75)",
-                            "지정가+LOC매수 (×0.25 +1)",
-                            "지정가+LOC절반 (×0.25 +0.5)",
-                            f"🏁 전액매도 ({h_cur}주, 슬롯 종료)"], key=f"sstp_{s['id']}")
-            if "0.75" in stp:
-                new_T = s['T'] * 0.75
-            elif "+1" in stp:
-                new_T = s['T'] * 0.25 + 1
-            elif "+0.5" in stp:
-                new_T = s['T'] * 0.25 + 0.5
+
+            if mode == 'reverse':
+                # 리버스 매도: T×0.9 or T×0.95 (한 옵션만)
+                stp = st.radio("매도 종류",
+                               ["일반 리버스 매도",
+                                f"🏁 전액매도 ({h_cur}주, 슬롯 종료)"], key=f"sstp_{s['id']}")
+                if "전액매도" in stp:
+                    new_T = s['T']
+                    st.warning(f"⚠️ 보유 전량 {h_cur}주를 매도하고 슬롯 종료됩니다.")
+                else:
+                    new_T = calc_reverse_T_sell(s['T'], s['split'])
+                    st.caption(f"리버스 매도: T {s['T']:.3f} → **{new_T:.3f}** (×{0.9 if s['split']==20 else 0.95})")
+                tx_mode = 'reverse'
             else:
-                new_T = s['T']
-                st.warning(f"⚠️ 보유 전량 {h_cur}주를 매도하고 슬롯 종료됩니다. 수량 입력값은 무시됨.")
-            st.caption(f"T: {s['T']:.3f} → **{new_T:.3f}**")
+                stp = st.radio("T값 변화",
+                               ["쿼터매도 (×0.75)",
+                                "지정가+LOC매수 (×0.25 +1)",
+                                "지정가+LOC절반 (×0.25 +0.5)",
+                                f"🏁 전액매도 ({h_cur}주, 슬롯 종료)"], key=f"sstp_{s['id']}")
+                if "0.75" in stp:
+                    new_T = s['T'] * 0.75
+                elif "+1" in stp:
+                    new_T = s['T'] * 0.25 + 1
+                elif "+0.5" in stp:
+                    new_T = s['T'] * 0.25 + 0.5
+                else:
+                    new_T = s['T']
+                    st.warning(f"⚠️ 보유 전량 {h_cur}주를 매도하고 슬롯 종료됩니다. 수량 입력값은 무시됨.")
+                st.caption(f"T: {s['T']:.3f} → **{new_T:.3f}**")
+                tx_mode = 'normal'
+
             if st.form_submit_button("💾 매도 저장", width='stretch'):
                 if "전액매도" in stp:
                     if h_cur <= 0:
@@ -529,6 +693,7 @@ def tab_history(s):
                         s['transactions'].append({
                             'date': str(fd), 'type': 'sell',
                             'price': float(fp), 'qty': int(h_cur),
+                            'mode': tx_mode,
                         })
                         s['status'] = 'completed'
                         s['completed_at'] = str(date.today())
@@ -540,6 +705,7 @@ def tab_history(s):
                     s['transactions'].append({
                         'date': str(fd), 'type': 'sell',
                         'price': float(fp), 'qty': int(fq),
+                        'mode': tx_mode,
                     })
                     s['T'] = new_T
                     persist()
@@ -670,7 +836,54 @@ def tab_slot_management():
     if cur:
         st.divider()
         st.subheader("📌 현재 슬롯 설정")
-        st.caption(f"`{cur['name']}` ({cur['ticker']})")
+        mode = cur.get('mode', 'normal')
+        if mode == 'reverse':
+            st.markdown(f"`{cur['name']}` ({cur['ticker']}) · 🔄 **리버스 모드**")
+        else:
+            st.markdown(f"`{cur['name']}` ({cur['ticker']}) · 일반 모드")
+
+        # 모드 수동 전환 (리버스 → 일반)
+        if mode == 'reverse':
+            cls = fetch_close(cur['ticker'])
+            exit_ok, threshold = check_reverse_exit(cur, cls)
+            if exit_ok:
+                st.success(f"✅ 종료조건 충족 (종가 ${cls:.2f} > 임계값 ${threshold:.2f})")
+            elif threshold:
+                cls_str = f"${cls:.2f}" if cls else "조회 실패"
+                st.caption(f"종료조건 미충족 (종가 {cls_str} ≤ 임계값 ${threshold:.2f})")
+
+            # 별지점 수동 입력
+            st.markdown("**🌙 별지점 수동 조정**")
+            auto_star = fetch_reverse_star(cur['ticker'])
+            current_star = cur.get('manual_reverse_star') or auto_star or 0.0
+            cc = st.columns([3, 1])
+            new_star = cc[0].number_input(
+                "별지점 ($)",
+                min_value=0.0,
+                value=float(current_star),
+                step=0.01,
+                format="%.2f",
+                key=f"star_{cur['id']}",
+                help=f"자동 계산값: ${auto_star:.2f}" if auto_star else "자동 계산 실패"
+            )
+            if cc[1].button("🔄 자동", width='stretch', key=f"star_auto_{cur['id']}"):
+                cur['manual_reverse_star'] = None
+                persist()
+                st.rerun()
+            if st.button("💾 별지점 저장", width='stretch', key=f"star_save_{cur['id']}"):
+                cur['manual_reverse_star'] = float(new_star) if new_star > 0 else None
+                persist()
+                st.success("별지점 저장됨")
+                st.rerun()
+
+            if st.button("🔄 일반모드 복귀", width='stretch', key=f"normal_{cur['id']}"):
+                cur['mode'] = 'normal'
+                cur['reverse_entered_at'] = None
+                cur['manual_reverse_star'] = None
+                persist()
+                st.success("일반모드로 복귀")
+                st.rerun()
+            st.markdown("---")
 
         with st.form(f"sl_{cur['id']}"):
             nn = st.text_input("이름", value=cur['name'])
