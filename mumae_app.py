@@ -299,7 +299,7 @@ def calc_reverse_T_sell(T, split):
 # ==========================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_close(ticker):
-    """현재가/종가: yfinance fast_info → history → stooq 순"""
+    """현재가/종가: yfinance fast_info → history → stooq 실시간 → stooq 일별 순"""
     # 1. yfinance fast_info (실시간 우선)
     try:
         t = yf.Ticker(ticker)
@@ -316,17 +316,40 @@ def fetch_close(ticker):
             return float(d['Close'].iloc[-1])
     except Exception:
         pass
-    # 3. stooq fallback (무료, 키 불필요)
+    # 3. stooq 실시간 CSV
     try:
         url = f"https://stooq.com/q/l/?s={ticker.lower()}.us&f=sd2t2ohlcv&h&e=csv"
         r = requests.get(url, timeout=5)
         if r.status_code == 200:
             lines = r.text.strip().split('\n')
             if len(lines) >= 2:
-                # CSV: Symbol,Date,Time,Open,High,Low,Close,Volume
                 parts = lines[1].split(',')
                 if len(parts) >= 7 and parts[6] not in ('N/D', ''):
-                    return float(parts[6])
+                    try:
+                        val = float(parts[6])
+                        if val > 0:
+                            return val
+                    except ValueError:
+                        pass
+    except Exception:
+        pass
+    # 4. stooq 일별 CSV (가장 안정적인 백업)
+    try:
+        url2 = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&i=d"
+        r = requests.get(url2, timeout=5)
+        if r.status_code == 200:
+            lines = r.text.strip().split('\n')
+            if len(lines) >= 2:
+                last_line = lines[-1].strip()
+                parts = last_line.split(',')
+                # Date,Open,High,Low,Close,Volume
+                if len(parts) >= 5 and parts[4]:
+                    try:
+                        val = float(parts[4])
+                        if val > 0:
+                            return val
+                    except ValueError:
+                        pass
     except Exception:
         pass
     return None
@@ -439,6 +462,9 @@ def render_sidebar():
         st.markdown(f"SOXL: **${soxl:.2f}**" if soxl else "SOXL: 조회 실패")
         st.markdown(f"TQQQ: **${tqqq:.2f}**" if tqqq else "TQQQ: 조회 실패")
         st.markdown(f"환율: **{rate:,.2f}원**" if rate else "환율: 조회 실패")
+        if st.button("🔄 시세 새로고침", width='stretch', key='refresh_cache'):
+            st.cache_data.clear()
+            st.rerun()
         st.divider()
         st.caption("슬롯 추가·관리·백업은 메인의 **⚙️ 슬롯 관리** 탭에서")
 
