@@ -1,6 +1,6 @@
 """
 무매v4.0 by Ryan
-모바일 우선. 3개 탭: 포트폴리오 / 매매이력 / 정산이력.
+구글 시트 백엔드 + URL 사용자 인증 (?user=xxx)
 """
 import streamlit as st
 import pandas as pd
@@ -8,6 +8,8 @@ import yfinance as yf
 from datetime import datetime, date, timedelta
 import json
 import uuid
+import gspread
+from google.oauth2 import service_account
 
 st.set_page_config(
     page_title="무매v4.0 by Ryan",
@@ -17,10 +19,138 @@ st.set_page_config(
 )
 
 # ==========================================
-# 세션
+# URL 사용자 인증
+# ==========================================
+query_params = st.query_params
+user = query_params.get('user', None)
+
+if not user:
+    st.title("🔒 접근 거부")
+    st.markdown("URL에 `?user=본인코드` 가 필요합니다.")
+    st.caption("관리자에게 본인 코드를 발급받아 사용하세요.")
+    st.stop()
+
+# 사용자 코드 검증 (영문/숫자만, 길이 6~30)
+if not user.replace('_', '').isalnum() or not (4 <= len(user) <= 50):
+    st.title("🔒 잘못된 사용자 코드")
+    st.markdown("사용자 코드가 올바르지 않습니다.")
+    st.stop()
+
+st.session_state.user = user
+
+# ==========================================
+# 구글 시트 연결
+# ==========================================
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+SLOT_HEADERS = ['id', 'name', 'ticker', 'capital', 'split', 'target_profit',
+                'T', 'status', 'created_at', 'completed_at']
+TX_HEADERS = ['slot_id', 'date', 'type', 'price', 'qty']
+
+@st.cache_resource(show_spinner=False)
+def get_spreadsheet():
+    creds = service_account.Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=SCOPES,
+    )
+    client = gspread.authorize(creds)
+    return client.open_by_key(st.secrets["sheet"]["sheet_id"])
+
+def get_or_create_ws(name, headers):
+    ss = get_spreadsheet()
+    try:
+        ws = ss.worksheet(name)
+    except gspread.WorksheetNotFound:
+        ws = ss.add_worksheet(title=name, rows=1000, cols=len(headers))
+        ws.update(values=[headers], range_name='A1')
+    return ws
+
+def load_user_data(u):
+    """시트에서 사용자 데이터 로드"""
+    slots_ws = get_or_create_ws(f"{u}_slots", SLOT_HEADERS)
+    txs_ws = get_or_create_ws(f"{u}_txs", TX_HEADERS)
+    slots_rows = slots_ws.get_all_records()
+    txs_rows = txs_ws.get_all_records()
+
+    slots = {}
+    for r in slots_rows:
+        if not r.get('id'):
+            continue
+        sid = str(r['id'])
+        slots[sid] = {
+            'id': sid,
+            'name': str(r.get('name', '')),
+            'ticker': str(r.get('ticker', '')).upper(),
+            'capital': float(r.get('capital') or 0),
+            'split': int(r.get('split') or 40),
+            'target_profit': float(r.get('target_profit') or 10),
+            'T': float(r.get('T') or 0),
+            'status': str(r.get('status', 'active')),
+            'created_at': str(r.get('created_at', '')),
+            'completed_at': (str(r['completed_at']) if r.get('completed_at') else None),
+            'transactions': [],
+        }
+    for r in txs_rows:
+        sid = str(r.get('slot_id', ''))
+        if sid in slots:
+            try:
+                slots[sid]['transactions'].append({
+                    'date': str(r['date']),
+                    'type': str(r['type']),
+                    'price': float(r['price']),
+                    'qty': int(r['qty']),
+                })
+            except Exception:
+                continue
+    return slots
+
+def save_user_data(u, slots):
+    """시트에 사용자 데이터 저장 (전체 덮어쓰기)"""
+    slots_ws = get_or_create_ws(f"{u}_slots", SLOT_HEADERS)
+    txs_ws = get_or_create_ws(f"{u}_txs", TX_HEADERS)
+
+    slot_rows = [SLOT_HEADERS]
+    for s in slots.values():
+        slot_rows.append([
+            s['id'], s['name'], s['ticker'],
+            s['capital'], s['split'], s['target_profit'],
+            s['T'], s['status'], s['created_at'],
+            s.get('completed_at') or '',
+        ])
+    slots_ws.clear()
+    slots_ws.update(values=slot_rows, range_name='A1')
+
+    tx_rows = [TX_HEADERS]
+    for s in slots.values():
+        for t in s['transactions']:
+            tx_rows.append([
+                s['id'], t['date'], t['type'],
+                t['price'], t['qty'],
+            ])
+    txs_ws.clear()
+    txs_ws.update(values=tx_rows, range_name='A1')
+
+def persist():
+    """현재 session_state.slots를 시트에 저장"""
+    try:
+        save_user_data(st.session_state.user, st.session_state.slots)
+    except Exception as e:
+        st.error(f"시트 저장 실패: {e}")
+
+# ==========================================
+# 초기 로드 (한 세션에 한 번)
 # ==========================================
 if 'slots' not in st.session_state:
-    st.session_state.slots = {}
+    with st.spinner("데이터 불러오는 중..."):
+        try:
+            st.session_state.slots = load_user_data(user)
+        except Exception as e:
+            st.error(f"데이터 로드 실패: {e}")
+            st.session_state.slots = {}
+
 if 'selected_slot_id' not in st.session_state:
     st.session_state.selected_slot_id = None
 
@@ -60,8 +190,7 @@ def calc_realized(transactions):
 def calc_star_pct(T, ticker, split):
     if ticker == 'TQQQ':
         return 15 - 1.5 * T if split == 20 else 15 - 0.75 * T
-    else:
-        return 20 - 2 * T if split == 20 else 20 - T
+    return 20 - 2 * T if split == 20 else 20 - T
 
 def calc_one_buy(cash, T, split):
     d = split - T
@@ -166,13 +295,13 @@ def trans_df(transactions):
     return pd.DataFrame(rows).iloc[::-1].reset_index(drop=True)
 
 # ==========================================
-# 사이드바: 새 슬롯 / 슬롯 관리 / 백업 / 완료
+# 사이드바
 # ==========================================
 def render_sidebar():
     with st.sidebar:
-        st.markdown("## ⚙️ 메뉴")
+        st.markdown(f"## ⚙️ 메뉴")
+        st.caption(f"👤 사용자: `{user}`")
 
-        # 새 슬롯
         with st.expander("➕ 새 슬롯 추가", expanded=not active_slots()):
             with st.form("new_slot", clear_on_submit=True):
                 name = st.text_input("슬롯 이름", placeholder="SOXL 1회차")
@@ -184,9 +313,9 @@ def render_sidebar():
                     if name and tk:
                         sid = create_slot(name, tk, cap, spl, tp)
                         st.session_state.selected_slot_id = sid
+                        persist()
                         st.rerun()
 
-        # 현재 슬롯 관리
         cur = current_slot()
         if cur:
             with st.expander("📌 현재 슬롯 관리"):
@@ -200,12 +329,14 @@ def render_sidebar():
                     if st.form_submit_button("저장", width='stretch'):
                         cur.update({'name': nn, 'ticker': ntk, 'capital': nc,
                                     'split': nspl, 'target_profit': ntp})
+                        persist()
                         st.rerun()
 
                 st.markdown("**T값 수동 조정**")
                 nT = st.number_input("T", value=float(cur['T']), step=0.1, format="%.4f", key=f"tm_{cur['id']}")
                 if st.button("적용", width='stretch', key=f"tmb_{cur['id']}"):
                     cur['T'] = nT
+                    persist()
                     st.rerun()
 
                 st.markdown("---")
@@ -220,20 +351,22 @@ def render_sidebar():
                         cur['status'] = 'completed'
                         cur['completed_at'] = str(date.today())
                         st.session_state.selected_slot_id = None
+                        persist()
                         st.rerun()
                 elif h == 0:
                     if st.button("🏁 종료 (보유 0)", width='stretch', key=f"end0_{cur['id']}"):
                         cur['status'] = 'completed'
                         cur['completed_at'] = str(date.today())
                         st.session_state.selected_slot_id = None
+                        persist()
                         st.rerun()
 
                 if st.button("🗑 영구 삭제", width='stretch', key=f"del_{cur['id']}"):
                     del st.session_state.slots[cur['id']]
                     st.session_state.selected_slot_id = None
+                    persist()
                     st.rerun()
 
-        # 완료 슬롯
         comp = completed_slots()
         if comp:
             with st.expander(f"🏁 완료 슬롯 ({len(comp)})"):
@@ -246,21 +379,23 @@ def render_sidebar():
                     if cc[0].button("복구", key=f"rc_{s['id']}", width='stretch'):
                         s['status'] = 'active'
                         s['completed_at'] = None
+                        persist()
                         st.rerun()
                     if cc[1].button("삭제", key=f"dc_{s['id']}", width='stretch'):
                         del st.session_state.slots[s['id']]
+                        persist()
                         st.rerun()
                     st.markdown("---")
 
-        # 백업
+        # 데이터 백업/복원 (옵션)
         st.markdown("---")
-        st.markdown("**💾 데이터**")
+        st.markdown("**💾 백업 (옵션)**")
         if st.session_state.slots:
             export = {'slots': st.session_state.slots}
             st.download_button(
                 "백업 다운로드",
                 json.dumps(export, ensure_ascii=False, indent=2),
-                file_name=f"mumae_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                file_name=f"mumae_{user}_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
                 mime="application/json",
                 width='stretch'
             )
@@ -269,6 +404,7 @@ def render_sidebar():
             try:
                 d = json.load(up)
                 st.session_state.slots = d['slots']
+                persist()
                 st.success("복원 완료")
                 st.rerun()
             except Exception as e:
@@ -285,7 +421,7 @@ def render_header():
     st.markdown("# 🚀 무매v4.0 by Ryan")
     acts = active_slots()
     if not acts:
-        st.info("← 왼쪽 상단 메뉴(>>)에서 슬롯을 추가하세요")
+        st.info("← 왼쪽 위 `>>` 버튼을 눌러 사이드바를 열고, 슬롯을 추가하세요")
         return None
     if len(acts) > 1:
         opts = [s['name'] for s in acts]
@@ -301,7 +437,7 @@ def render_header():
     return current_slot()
 
 # ==========================================
-# 탭1: 포트폴리오
+# 탭 1: 포트폴리오
 # ==========================================
 def tab_portfolio(s):
     h, a, cash, _, _ = calc_holdings(s['transactions'], s['capital'])
@@ -328,7 +464,6 @@ def tab_portfolio(s):
     cc[1].metric("운용 종목수", f"{len(active_slots())}개")
 
     st.divider()
-
     st.subheader(f"📌 {s['name']}")
     phase = get_phase(T, spl)
     cc = st.columns(2)
@@ -342,7 +477,6 @@ def tab_portfolio(s):
     cc[1].metric("잔금", f"${cash:,.0f}")
 
     st.divider()
-
     star_pct = calc_star_pct(T, s['ticker'], spl)
     star_price = a * (1 + star_pct / 100) if a else 0
 
@@ -383,7 +517,7 @@ def tab_portfolio(s):
             st.markdown(f"- {spct}% 지정가 `${target_sell}` · **{rest}주**")
 
 # ==========================================
-# 탭2: 매매이력
+# 탭 2: 매매이력
 # ==========================================
 def tab_history(s):
     cls = fetch_close(s['ticker'])
@@ -408,11 +542,11 @@ def tab_history(s):
                     'price': float(fp), 'qty': int(fq),
                 })
                 s['T'] = new_T
+                persist()
                 st.success("매수 저장됨")
                 st.rerun()
 
     with stab:
-        # 현재 보유량 (전액매도용)
         h_cur, _, _, _, _ = calc_holdings(s['transactions'], s['capital'])
         with st.form(f"sell_{s['id']}", clear_on_submit=True):
             fd = st.date_input("날짜", value=date.today(), key=f"sd_{s['id']}")
@@ -431,7 +565,7 @@ def tab_history(s):
                 new_T = s['T'] * 0.25 + 1
             elif "+0.5" in stp:
                 new_T = s['T'] * 0.25 + 0.5
-            else:  # 전액매도
+            else:
                 new_T = s['T']
                 st.warning(f"⚠️ 보유 전량 {h_cur}주를 매도하고 슬롯 종료됩니다. 수량 입력값은 무시됨.")
             st.caption(f"T: {s['T']:.3f} → **{new_T:.3f}**")
@@ -447,6 +581,7 @@ def tab_history(s):
                         s['status'] = 'completed'
                         s['completed_at'] = str(date.today())
                         st.session_state.selected_slot_id = None
+                        persist()
                         st.success(f"🏁 전액매도 ({h_cur}주 × ${fp:.2f}) 완료. 슬롯 종료됨.")
                         st.rerun()
                 else:
@@ -455,6 +590,7 @@ def tab_history(s):
                         'price': float(fp), 'qty': int(fq),
                     })
                     s['T'] = new_T
+                    persist()
                     st.success("매도 저장됨")
                     st.rerun()
 
@@ -503,15 +639,15 @@ def tab_history(s):
                         except Exception:
                             continue
                     s['transactions'] = nt
+                    persist()
                     st.warning("저장됨. T값은 자동 복원 안 됨")
                     st.rerun()
 
 # ==========================================
-# 탭3: 정산이력
+# 탭 3: 정산이력
 # ==========================================
 def tab_settlement(s):
     st.subheader("💰 정산 이력")
-
     cc = st.columns(2)
     start = cc[0].date_input("시작일", value=date.today() - timedelta(days=90), key=f"st_{s['id']}")
     end = cc[1].date_input("종료일", value=date.today(), key=f"et_{s['id']}")
@@ -545,7 +681,6 @@ def tab_settlement(s):
     total = sum(x['실현수익'] for x in filtered)
     color = '#22c55e' if total >= 0 else '#ef4444'
     big_number("기간 실현 수익", f"{total:+.2f} USD", color)
-
     st.markdown("<br>", unsafe_allow_html=True)
 
     if not filtered:
