@@ -572,7 +572,7 @@ def tab_portfolio(s):
     st.divider()
 
     # === 2. 투자 수익률 / 손익 ===
-    pcolor = '#22c55e' if total_pct >= 0 else '#ef4444'
+    pcolor = '#ef4444' if total_pct >= 0 else '#3b82f6'
     big_number("투자 수익률", f"{total_pct:+.2f}%", pcolor)
     st.markdown("<br>", unsafe_allow_html=True)
     big_number("투자 손익", f"{total_profit:+.2f} USD", pcolor)
@@ -685,7 +685,7 @@ def sell_result_dialog():
     except Exception:
         pass
 
-    color = '#22c55e' if realized >= 0 else '#ef4444'
+    color = '#ef4444' if realized >= 0 else '#3b82f6'
     st.markdown(
         f"<div style='text-align: center; padding: 10px 0;'>"
         f"<div style='font-size: 14px; color: #888;'>실현 수익</div>"
@@ -914,7 +914,7 @@ def tab_settlement(s):
         filtered = []
 
     total = sum(x['실현수익'] for x in filtered)
-    color = '#22c55e' if total >= 0 else '#ef4444'
+    color = '#ef4444' if total >= 0 else '#3b82f6'
     big_number("기간 실현 수익", f"{total:+.2f} USD", color)
     st.markdown("<br>", unsafe_allow_html=True)
 
