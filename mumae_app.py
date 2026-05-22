@@ -1,6 +1,8 @@
 """
 무매v4.0 by Ryan
-구글 시트 백엔드 + URL 사용자 인증 (?user=xxx)
+- 구글 시트 백엔드 + URL 사용자 인증 (?user=xxx)
+- 4탭 (포트폴리오/매매이력/정산이력/슬롯 관리)
+- 슬롯 없을 때 SOXL 종가 + 환율 표시
 """
 import streamlit as st
 import pandas as pd
@@ -30,7 +32,6 @@ if not user:
     st.caption("관리자에게 본인 코드를 발급받아 사용하세요.")
     st.stop()
 
-# 사용자 코드 검증 (영문/숫자만, 길이 6~30)
 if not user.replace('_', '').isalnum() or not (4 <= len(user) <= 50):
     st.title("🔒 잘못된 사용자 코드")
     st.markdown("사용자 코드가 올바르지 않습니다.")
@@ -69,7 +70,6 @@ def get_or_create_ws(name, headers):
     return ws
 
 def load_user_data(u):
-    """시트에서 사용자 데이터 로드"""
     slots_ws = get_or_create_ws(f"{u}_slots", SLOT_HEADERS)
     txs_ws = get_or_create_ws(f"{u}_txs", TX_HEADERS)
     slots_rows = slots_ws.get_all_records()
@@ -108,7 +108,6 @@ def load_user_data(u):
     return slots
 
 def save_user_data(u, slots):
-    """시트에 사용자 데이터 저장 (전체 덮어쓰기)"""
     slots_ws = get_or_create_ws(f"{u}_slots", SLOT_HEADERS)
     txs_ws = get_or_create_ws(f"{u}_txs", TX_HEADERS)
 
@@ -134,14 +133,13 @@ def save_user_data(u, slots):
     txs_ws.update(values=tx_rows, range_name='A1')
 
 def persist():
-    """현재 session_state.slots를 시트에 저장"""
     try:
         save_user_data(st.session_state.user, st.session_state.slots)
     except Exception as e:
         st.error(f"시트 저장 실패: {e}")
 
 # ==========================================
-# 초기 로드 (한 세션에 한 번)
+# 초기 로드
 # ==========================================
 if 'slots' not in st.session_state:
     with st.spinner("데이터 불러오는 중..."):
@@ -295,124 +293,19 @@ def trans_df(transactions):
     return pd.DataFrame(rows).iloc[::-1].reset_index(drop=True)
 
 # ==========================================
-# 사이드바
+# 사이드바: 사용자 정보 + 환율 + 안내
 # ==========================================
 def render_sidebar():
     with st.sidebar:
-        st.markdown(f"## ⚙️ 메뉴")
-        st.caption(f"👤 사용자: `{user}`")
-
-        with st.expander("➕ 새 슬롯 추가", expanded=not active_slots()):
-            with st.form("new_slot", clear_on_submit=True):
-                name = st.text_input("슬롯 이름", placeholder="SOXL 1회차")
-                tk = st.text_input("종목", "SOXL").upper()
-                cap = st.number_input("원금 ($)", min_value=100.0, value=5000.0, step=100.0)
-                spl = st.selectbox("분할", [20, 30, 40], index=2)
-                tp = st.number_input("목표 수익률 (%)", min_value=1.0, value=10.0, step=1.0)
-                if st.form_submit_button("생성", width='stretch'):
-                    if name and tk:
-                        sid = create_slot(name, tk, cap, spl, tp)
-                        st.session_state.selected_slot_id = sid
-                        persist()
-                        st.rerun()
-
-        cur = current_slot()
-        if cur:
-            with st.expander("📌 현재 슬롯 관리"):
-                with st.form(f"sl_{cur['id']}"):
-                    nn = st.text_input("이름", value=cur['name'])
-                    ntk = st.text_input("종목", value=cur['ticker']).upper()
-                    nc = st.number_input("원금", min_value=100.0, value=float(cur['capital']), step=100.0)
-                    nspl = st.selectbox("분할", [20, 30, 40],
-                                         index=[20,30,40].index(cur['split']) if cur['split'] in [20,30,40] else 2)
-                    ntp = st.number_input("목표 (%)", min_value=1.0, value=float(cur['target_profit']), step=1.0)
-                    if st.form_submit_button("저장", width='stretch'):
-                        cur.update({'name': nn, 'ticker': ntk, 'capital': nc,
-                                    'split': nspl, 'target_profit': ntp})
-                        persist()
-                        st.rerun()
-
-                st.markdown("**T값 수동 조정**")
-                nT = st.number_input("T", value=float(cur['T']), step=0.1, format="%.4f", key=f"tm_{cur['id']}")
-                if st.button("적용", width='stretch', key=f"tmb_{cur['id']}"):
-                    cur['T'] = nT
-                    persist()
-                    st.rerun()
-
-                st.markdown("---")
-                h, _, _, _, _ = calc_holdings(cur['transactions'], cur['capital'])
-                cls = fetch_close(cur['ticker'])
-                if h > 0 and cls:
-                    if st.button(f"🏁 전량매도(${cls:.2f}) 종료", width='stretch', key=f"end_{cur['id']}"):
-                        cur['transactions'].append({
-                            'date': str(date.today()), 'type': 'sell',
-                            'price': float(cls), 'qty': int(h)
-                        })
-                        cur['status'] = 'completed'
-                        cur['completed_at'] = str(date.today())
-                        st.session_state.selected_slot_id = None
-                        persist()
-                        st.rerun()
-                elif h == 0:
-                    if st.button("🏁 종료 (보유 0)", width='stretch', key=f"end0_{cur['id']}"):
-                        cur['status'] = 'completed'
-                        cur['completed_at'] = str(date.today())
-                        st.session_state.selected_slot_id = None
-                        persist()
-                        st.rerun()
-
-                if st.button("🗑 영구 삭제", width='stretch', key=f"del_{cur['id']}"):
-                    del st.session_state.slots[cur['id']]
-                    st.session_state.selected_slot_id = None
-                    persist()
-                    st.rerun()
-
-        comp = completed_slots()
-        if comp:
-            with st.expander(f"🏁 완료 슬롯 ({len(comp)})"):
-                for s in comp:
-                    rz = calc_realized(s['transactions'])
-                    pct = (rz / s['capital'] * 100) if s['capital'] else 0
-                    st.markdown(f"**{s['name']}** ({s['ticker']})")
-                    st.caption(f"수익 ${rz:.2f} ({pct:+.2f}%) · {s.get('completed_at', '-')}")
-                    cc = st.columns(2)
-                    if cc[0].button("복구", key=f"rc_{s['id']}", width='stretch'):
-                        s['status'] = 'active'
-                        s['completed_at'] = None
-                        persist()
-                        st.rerun()
-                    if cc[1].button("삭제", key=f"dc_{s['id']}", width='stretch'):
-                        del st.session_state.slots[s['id']]
-                        persist()
-                        st.rerun()
-                    st.markdown("---")
-
-        # 데이터 백업/복원 (옵션)
-        st.markdown("---")
-        st.markdown("**💾 백업 (옵션)**")
-        if st.session_state.slots:
-            export = {'slots': st.session_state.slots}
-            st.download_button(
-                "백업 다운로드",
-                json.dumps(export, ensure_ascii=False, indent=2),
-                file_name=f"mumae_{user}_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                mime="application/json",
-                width='stretch'
-            )
-        up = st.file_uploader("백업 복원", type='json', label_visibility='collapsed')
-        if up:
-            try:
-                d = json.load(up)
-                st.session_state.slots = d['slots']
-                persist()
-                st.success("복원 완료")
-                st.rerun()
-            except Exception as e:
-                st.error(f"오류: {e}")
-
+        st.markdown(f"👤 **사용자**: `{user}`")
+        st.divider()
         rate = fetch_rate()
         if rate:
-            st.caption(f"💱 환율: {rate:,.2f}원")
+            st.metric("💱 USD/KRW", f"{rate:,.2f}원")
+        else:
+            st.caption("💱 환율 조회 실패")
+        st.divider()
+        st.caption("슬롯 추가·관리·백업은 메인의 **⚙️ 슬롯 관리** 탭에서")
 
 # ==========================================
 # 헤더
@@ -420,9 +313,25 @@ def render_sidebar():
 def render_header():
     st.markdown("# 🚀 무매v4.0 by Ryan")
     acts = active_slots()
+
     if not acts:
-        st.info("← 왼쪽 위 `>>` 버튼을 눌러 사이드바를 열고, 슬롯을 추가하세요")
+        # 슬롯이 없을 때: SOXL 종가 + 환율 표시 + 안내
+        st.info("아직 슬롯이 없어요. 아래 **⚙️ 슬롯 관리** 탭에서 슬롯을 추가하세요.")
+        soxl_close = fetch_close("SOXL")
+        rate = fetch_rate()
+        with st.container(border=True):
+            cc = st.columns(2)
+            cc[0].metric(
+                "📊 SOXL 최근 종가",
+                f"${soxl_close:.2f}" if soxl_close else "조회 실패"
+            )
+            cc[1].metric(
+                "💱 USD/KRW 환율",
+                f"{rate:,.2f}원" if rate else "조회 실패"
+            )
         return None
+
+    # 슬롯이 여러 개면 selector
     if len(acts) > 1:
         opts = [s['name'] for s in acts]
         sids = [s['id'] for s in acts]
@@ -691,15 +600,151 @@ def tab_settlement(s):
     st.dataframe(df, hide_index=True, width='stretch')
 
 # ==========================================
+# 탭 4: 슬롯 관리
+# ==========================================
+def tab_slot_management():
+    # 새 슬롯 추가
+    st.subheader("➕ 새 슬롯 추가")
+    with st.form("new_slot", clear_on_submit=True):
+        name = st.text_input("슬롯 이름", placeholder="SOXL 1회차")
+        tk = st.text_input("종목 코드", "SOXL").upper()
+        cc = st.columns(2)
+        cap = cc[0].number_input("원금 ($)", min_value=100.0, value=5000.0, step=100.0)
+        spl = cc[1].selectbox("분할 횟수", [20, 30, 40], index=2)
+        tp = st.number_input("목표 수익률 (%)", min_value=1.0, value=10.0, step=1.0)
+        if st.form_submit_button("✅ 슬롯 생성", width='stretch'):
+            if name and tk:
+                sid = create_slot(name, tk, cap, spl, tp)
+                st.session_state.selected_slot_id = sid
+                persist()
+                st.success("슬롯 생성됨")
+                st.rerun()
+            else:
+                st.error("이름과 종목 코드 입력 필요")
+
+    # 현재 슬롯 관리
+    cur = current_slot()
+    if cur:
+        st.divider()
+        st.subheader("📌 현재 슬롯 설정")
+        st.caption(f"`{cur['name']}` ({cur['ticker']})")
+
+        with st.form(f"sl_{cur['id']}"):
+            nn = st.text_input("이름", value=cur['name'])
+            ntk = st.text_input("종목", value=cur['ticker']).upper()
+            cc = st.columns(2)
+            nc = cc[0].number_input("원금 ($)", min_value=100.0, value=float(cur['capital']), step=100.0)
+            nspl = cc[1].selectbox("분할", [20, 30, 40],
+                                 index=[20,30,40].index(cur['split']) if cur['split'] in [20,30,40] else 2)
+            ntp = st.number_input("목표 수익률 (%)", min_value=1.0, value=float(cur['target_profit']), step=1.0)
+            if st.form_submit_button("💾 설정 저장", width='stretch'):
+                cur.update({'name': nn, 'ticker': ntk, 'capital': nc,
+                            'split': nspl, 'target_profit': ntp})
+                persist()
+                st.success("저장됨")
+                st.rerun()
+
+        st.markdown("**🔧 T값 수동 조정**")
+        nT = st.number_input("T 값", value=float(cur['T']), step=0.1, format="%.4f", key=f"tm_{cur['id']}")
+        if st.button("T 적용", width='stretch', key=f"tmb_{cur['id']}"):
+            cur['T'] = nT
+            persist()
+            st.success("T값 변경됨")
+            st.rerun()
+
+        st.divider()
+        st.markdown("**⚠️ 위험 구역**")
+        h, _, _, _, _ = calc_holdings(cur['transactions'], cur['capital'])
+        cls = fetch_close(cur['ticker'])
+        if h > 0 and cls:
+            if st.button(f"🏁 전량매도 (${cls:.2f}) & 슬롯 종료", width='stretch', key=f"end_{cur['id']}"):
+                cur['transactions'].append({
+                    'date': str(date.today()), 'type': 'sell',
+                    'price': float(cls), 'qty': int(h)
+                })
+                cur['status'] = 'completed'
+                cur['completed_at'] = str(date.today())
+                st.session_state.selected_slot_id = None
+                persist()
+                st.rerun()
+        elif h == 0:
+            if st.button("🏁 슬롯 종료 (보유 0)", width='stretch', key=f"end0_{cur['id']}"):
+                cur['status'] = 'completed'
+                cur['completed_at'] = str(date.today())
+                st.session_state.selected_slot_id = None
+                persist()
+                st.rerun()
+
+        with st.expander("🗑 슬롯 영구 삭제"):
+            st.error("복구 불가능. 모든 거래 이력이 사라집니다.")
+            if st.button("⚠️ 삭제 확정", width='stretch', key=f"del_{cur['id']}"):
+                del st.session_state.slots[cur['id']]
+                st.session_state.selected_slot_id = None
+                persist()
+                st.rerun()
+
+    # 완료된 슬롯
+    comp = completed_slots()
+    if comp:
+        st.divider()
+        st.subheader(f"🏁 완료된 슬롯 ({len(comp)}개)")
+        for s in comp:
+            rz = calc_realized(s['transactions'])
+            pct = (rz / s['capital'] * 100) if s['capital'] else 0
+            with st.expander(f"{s['name']} ({s['ticker']}) · ${rz:.2f} ({pct:+.2f}%)"):
+                st.caption(f"기간: {s['created_at']} → {s.get('completed_at', '-')}")
+                cc = st.columns(2)
+                if cc[0].button("🔄 복구 (진행 전환)", key=f"rc_{s['id']}", width='stretch'):
+                    s['status'] = 'active'
+                    s['completed_at'] = None
+                    persist()
+                    st.rerun()
+                if cc[1].button("🗑 삭제", key=f"dc_{s['id']}", width='stretch'):
+                    del st.session_state.slots[s['id']]
+                    persist()
+                    st.rerun()
+
+    # 백업/복원
+    st.divider()
+    st.subheader("💾 백업 / 복원")
+    if st.session_state.slots:
+        export = {'slots': st.session_state.slots}
+        st.download_button(
+            "백업 파일 다운로드",
+            json.dumps(export, ensure_ascii=False, indent=2),
+            file_name=f"mumae_{user}_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            mime="application/json",
+            width='stretch'
+        )
+    up = st.file_uploader("백업 파일로 복원", type='json')
+    if up:
+        try:
+            d = json.load(up)
+            st.session_state.slots = d['slots']
+            persist()
+            st.success("복원 완료")
+            st.rerun()
+        except Exception as e:
+            st.error(f"오류: {e}")
+
+# ==========================================
 # 라우팅
 # ==========================================
 render_sidebar()
 cur = render_header()
-if cur:
-    t1, t2, t3 = st.tabs(["📊 포트폴리오", "📝 매매이력", "💰 정산이력"])
+
+if not active_slots():
+    # 슬롯 없을 때: 슬롯 관리 탭만 표시
+    st.divider()
+    tab_slot_management()
+else:
+    # 슬롯 있을 때: 4개 탭
+    t1, t2, t3, t4 = st.tabs(["📊 포트폴리오", "📝 매매이력", "💰 정산이력", "⚙️ 슬롯 관리"])
     with t1:
         tab_portfolio(cur)
     with t2:
         tab_history(cur)
     with t3:
         tab_settlement(cur)
+    with t4:
+        tab_slot_management()
