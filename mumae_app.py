@@ -7,6 +7,7 @@
 import streamlit as st
 import pandas as pd
 import yfinance as yf
+import requests
 from datetime import datetime, date, timedelta
 import json
 import uuid
@@ -207,10 +208,21 @@ def phase_label(p):
 # ==========================================
 # yfinance
 # ==========================================
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_close(ticker):
+    """현재가 우선 (fast_info), 안 되면 직전 종가"""
     try:
-        d = yf.Ticker(ticker).history(period="5d")
+        t = yf.Ticker(ticker)
+        # 1. fast_info의 last_price (장중엔 실시간, 장후엔 직전 종가)
+        try:
+            fi = t.fast_info
+            p = fi.get('last_price') if hasattr(fi, 'get') else getattr(fi, 'last_price', None)
+            if p and p > 0:
+                return float(p)
+        except Exception:
+            pass
+        # 2. history fallback
+        d = t.history(period="5d")
         if not d.empty:
             return float(d['Close'].iloc[-1])
     except Exception:
@@ -219,10 +231,26 @@ def fetch_close(ticker):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_rate():
+    """환율: yfinance 우선, 실패시 frankfurter API"""
+    # 1. yfinance USDKRW=X
     try:
         d = yf.Ticker("USDKRW=X").history(period="2d")
         if not d.empty:
             return float(d['Close'].iloc[-1])
+    except Exception:
+        pass
+    # 2. yfinance KRW=X
+    try:
+        d = yf.Ticker("KRW=X").history(period="2d")
+        if not d.empty:
+            return float(d['Close'].iloc[-1])
+    except Exception:
+        pass
+    # 3. frankfurter.app (무료 환율 API, 키 불필요)
+    try:
+        r = requests.get("https://api.frankfurter.app/latest?from=USD&to=KRW", timeout=5)
+        if r.status_code == 200:
+            return float(r.json()['rates']['KRW'])
     except Exception:
         pass
     return None
@@ -299,11 +327,13 @@ def render_sidebar():
     with st.sidebar:
         st.markdown(f"👤 **사용자**: `{user}`")
         st.divider()
+        st.markdown("**📊 시세**")
+        soxl = fetch_close("SOXL")
+        tqqq = fetch_close("TQQQ")
         rate = fetch_rate()
-        if rate:
-            st.metric("💱 USD/KRW", f"{rate:,.2f}원")
-        else:
-            st.caption("💱 환율 조회 실패")
+        st.markdown(f"SOXL: **${soxl:.2f}**" if soxl else "SOXL: 조회 실패")
+        st.markdown(f"TQQQ: **${tqqq:.2f}**" if tqqq else "TQQQ: 조회 실패")
+        st.markdown(f"환율: **{rate:,.2f}원**" if rate else "환율: 조회 실패")
         st.divider()
         st.caption("슬롯 추가·관리·백업은 메인의 **⚙️ 슬롯 관리** 탭에서")
 
@@ -322,7 +352,7 @@ def render_header():
         with st.container(border=True):
             cc = st.columns(2)
             cc[0].metric(
-                "📊 SOXL 최근 종가",
+                "📊 SOXL 현재가",
                 f"${soxl_close:.2f}" if soxl_close else "조회 실패"
             )
             cc[1].metric(
@@ -382,7 +412,7 @@ def tab_portfolio(s):
     cc[0].metric("보유", f"{h}주")
     cc[1].metric("평단", f"${a:.2f}" if a else "-")
     cc = st.columns(2)
-    cc[0].metric("최근 종가", f"${cls:.2f}" if cls else "-")
+    cc[0].metric("현재가", f"${cls:.2f}" if cls else "-")
     cc[1].metric("잔금", f"${cash:,.0f}")
 
     st.divider()
@@ -611,7 +641,7 @@ def tab_slot_management():
         cc = st.columns(2)
         cap = cc[0].number_input("원금 ($)", min_value=100.0, value=5000.0, step=100.0)
         spl = cc[1].selectbox("분할 횟수", [20, 30, 40], index=2)
-        tp = st.number_input("목표 수익률 (%)", min_value=1.0, value=10.0, step=1.0)
+        tp = st.number_input("목표 수익률 (%)", min_value=1.0, value=20.0, step=1.0)
         if st.form_submit_button("✅ 슬롯 생성", width='stretch'):
             if name and tk:
                 sid = create_slot(name, tk, cap, spl, tp)
