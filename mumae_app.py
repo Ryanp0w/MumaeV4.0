@@ -670,19 +670,17 @@ def tab_history(s):
             else:
                 stp = st.radio("T값 변화",
                                ["쿼터매도 (×0.75)",
-                                "지정가+LOC매수 (×0.25 +1)",
-                                "지정가+LOC절반 (×0.25 +0.5)",
+                                "지정가 매도 (×0.25)",
                                 f"🏁 전액매도 ({h_cur}주, 슬롯 종료)"], key=f"sstp_{s['id']}")
                 if "0.75" in stp:
                     new_T = s['T'] * 0.75
-                elif "+1" in stp:
-                    new_T = s['T'] * 0.25 + 1
-                elif "+0.5" in stp:
-                    new_T = s['T'] * 0.25 + 0.5
+                elif "0.25" in stp:
+                    new_T = s['T'] * 0.25
                 else:
                     new_T = s['T']
                     st.warning(f"⚠️ 보유 전량 {h_cur}주를 매도하고 슬롯 종료됩니다. 수량 입력값은 무시됨.")
                 st.caption(f"T: {s['T']:.3f} → **{new_T:.3f}**")
+                st.caption("💡 별지점 LOC 매수가 같이 체결됐다면 매수 폼에서 따로 입력")
                 tx_mode = 'normal'
 
             if st.form_submit_button("💾 매도 저장", width='stretch'):
