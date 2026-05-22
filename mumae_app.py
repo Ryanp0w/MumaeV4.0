@@ -1,0 +1,570 @@
+"""
+무매v4.0 by Ryan
+모바일 우선. 3개 탭: 포트폴리오 / 매매이력 / 정산이력.
+"""
+import streamlit as st
+import pandas as pd
+import yfinance as yf
+from datetime import datetime, date, timedelta
+import json
+import uuid
+
+st.set_page_config(
+    page_title="무매v4.0 by Ryan",
+    page_icon="🚀",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
+
+# ==========================================
+# 세션
+# ==========================================
+if 'slots' not in st.session_state:
+    st.session_state.slots = {}
+if 'selected_slot_id' not in st.session_state:
+    st.session_state.selected_slot_id = None
+
+# ==========================================
+# 계산
+# ==========================================
+def calc_holdings(transactions, capital):
+    h, a, used, rev = 0, 0.0, 0.0, 0.0
+    for t in transactions:
+        if t['type'] == 'buy':
+            new_total = a * h + t['price'] * t['qty']
+            h += t['qty']
+            a = new_total / h if h > 0 else 0
+            used += t['price'] * t['qty']
+        else:
+            h -= t['qty']
+            rev += t['price'] * t['qty']
+            if h <= 0:
+                h, a = 0, 0
+    cash = capital - used + rev
+    return h, a, cash, used, rev
+
+def calc_realized(transactions):
+    h, a, realized = 0, 0.0, 0.0
+    for t in transactions:
+        if t['type'] == 'buy':
+            new_total = a * h + t['price'] * t['qty']
+            h += t['qty']
+            a = new_total / h if h > 0 else 0
+        else:
+            realized += (t['price'] - a) * t['qty']
+            h -= t['qty']
+            if h <= 0:
+                h, a = 0, 0
+    return realized
+
+def calc_star_pct(T, ticker, split):
+    if ticker == 'TQQQ':
+        return 15 - 1.5 * T if split == 20 else 15 - 0.75 * T
+    else:
+        return 20 - 2 * T if split == 20 else 20 - T
+
+def calc_one_buy(cash, T, split):
+    d = split - T
+    return cash / d if d > 0 else 0
+
+def get_phase(T, split):
+    if T >= split - 1:
+        return 'sojin'
+    elif T >= split / 2:
+        return 'late'
+    return 'early'
+
+def phase_label(p):
+    return {'early': '전반전', 'late': '후반전', 'sojin': '소진'}[p]
+
+# ==========================================
+# yfinance
+# ==========================================
+@st.cache_data(ttl=600, show_spinner=False)
+def fetch_close(ticker):
+    try:
+        d = yf.Ticker(ticker).history(period="5d")
+        if not d.empty:
+            return float(d['Close'].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_rate():
+    try:
+        d = yf.Ticker("USDKRW=X").history(period="2d")
+        if not d.empty:
+            return float(d['Close'].iloc[-1])
+    except Exception:
+        pass
+    return None
+
+# ==========================================
+# 슬롯 헬퍼
+# ==========================================
+def create_slot(name, ticker, capital, split, target_profit):
+    sid = str(uuid.uuid4())[:8]
+    st.session_state.slots[sid] = {
+        'id': sid, 'name': name, 'ticker': ticker,
+        'capital': float(capital), 'split': int(split),
+        'target_profit': float(target_profit),
+        'T': 0.0, 'transactions': [],
+        'status': 'active',
+        'created_at': str(date.today()),
+        'completed_at': None,
+    }
+    return sid
+
+def active_slots():
+    return [s for s in st.session_state.slots.values() if s.get('status') == 'active']
+
+def completed_slots():
+    return [s for s in st.session_state.slots.values() if s.get('status') == 'completed']
+
+def current_slot():
+    sid = st.session_state.selected_slot_id
+    if sid and sid in st.session_state.slots and st.session_state.slots[sid].get('status') == 'active':
+        return st.session_state.slots[sid]
+    acts = active_slots()
+    if acts:
+        st.session_state.selected_slot_id = acts[0]['id']
+        return acts[0]
+    return None
+
+def big_number(label, value_str, color):
+    st.markdown(
+        f"<div style='text-align: center; padding: 4px 0;'>"
+        f"<div style='font-size: 13px; color: #888; margin-bottom: 4px;'>{label}</div>"
+        f"<div style='font-size: 40px; font-weight: bold; color: {color}; line-height: 1.1;'>{value_str}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+def trans_df(transactions):
+    if not transactions:
+        return pd.DataFrame()
+    rows = []
+    h, a = 0, 0.0
+    for t in sorted(transactions, key=lambda x: x['date']):
+        if t['type'] == 'buy':
+            new_total = a * h + t['price'] * t['qty']
+            h += t['qty']
+            a = new_total / h if h > 0 else 0
+        else:
+            h -= t['qty']
+            if h <= 0:
+                h, a = 0, 0
+        rows.append({
+            '날짜': t['date'],
+            '구분': '매수' if t['type'] == 'buy' else '매도',
+            '수량': t['qty'],
+            '가격': round(t['price'], 2),
+            '평단': round(a, 2) if a else 0,
+            '금액': round(t['price'] * t['qty'], 2),
+        })
+    return pd.DataFrame(rows).iloc[::-1].reset_index(drop=True)
+
+# ==========================================
+# 사이드바: 새 슬롯 / 슬롯 관리 / 백업 / 완료
+# ==========================================
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("## ⚙️ 메뉴")
+
+        # 새 슬롯
+        with st.expander("➕ 새 슬롯 추가", expanded=not active_slots()):
+            with st.form("new_slot", clear_on_submit=True):
+                name = st.text_input("슬롯 이름", placeholder="SOXL 1회차")
+                tk = st.text_input("종목", "SOXL").upper()
+                cap = st.number_input("원금 ($)", min_value=100.0, value=5000.0, step=100.0)
+                spl = st.selectbox("분할", [20, 30, 40], index=2)
+                tp = st.number_input("목표 수익률 (%)", min_value=1.0, value=10.0, step=1.0)
+                if st.form_submit_button("생성", width='stretch'):
+                    if name and tk:
+                        sid = create_slot(name, tk, cap, spl, tp)
+                        st.session_state.selected_slot_id = sid
+                        st.rerun()
+
+        # 현재 슬롯 관리
+        cur = current_slot()
+        if cur:
+            with st.expander("📌 현재 슬롯 관리"):
+                with st.form(f"sl_{cur['id']}"):
+                    nn = st.text_input("이름", value=cur['name'])
+                    ntk = st.text_input("종목", value=cur['ticker']).upper()
+                    nc = st.number_input("원금", min_value=100.0, value=float(cur['capital']), step=100.0)
+                    nspl = st.selectbox("분할", [20, 30, 40],
+                                         index=[20,30,40].index(cur['split']) if cur['split'] in [20,30,40] else 2)
+                    ntp = st.number_input("목표 (%)", min_value=1.0, value=float(cur['target_profit']), step=1.0)
+                    if st.form_submit_button("저장", width='stretch'):
+                        cur.update({'name': nn, 'ticker': ntk, 'capital': nc,
+                                    'split': nspl, 'target_profit': ntp})
+                        st.rerun()
+
+                st.markdown("**T값 수동 조정**")
+                nT = st.number_input("T", value=float(cur['T']), step=0.1, format="%.4f", key=f"tm_{cur['id']}")
+                if st.button("적용", width='stretch', key=f"tmb_{cur['id']}"):
+                    cur['T'] = nT
+                    st.rerun()
+
+                st.markdown("---")
+                h, _, _, _, _ = calc_holdings(cur['transactions'], cur['capital'])
+                cls = fetch_close(cur['ticker'])
+                if h > 0 and cls:
+                    if st.button(f"🏁 전량매도(${cls:.2f}) 종료", width='stretch', key=f"end_{cur['id']}"):
+                        cur['transactions'].append({
+                            'date': str(date.today()), 'type': 'sell',
+                            'price': float(cls), 'qty': int(h)
+                        })
+                        cur['status'] = 'completed'
+                        cur['completed_at'] = str(date.today())
+                        st.session_state.selected_slot_id = None
+                        st.rerun()
+                elif h == 0:
+                    if st.button("🏁 종료 (보유 0)", width='stretch', key=f"end0_{cur['id']}"):
+                        cur['status'] = 'completed'
+                        cur['completed_at'] = str(date.today())
+                        st.session_state.selected_slot_id = None
+                        st.rerun()
+
+                if st.button("🗑 영구 삭제", width='stretch', key=f"del_{cur['id']}"):
+                    del st.session_state.slots[cur['id']]
+                    st.session_state.selected_slot_id = None
+                    st.rerun()
+
+        # 완료 슬롯
+        comp = completed_slots()
+        if comp:
+            with st.expander(f"🏁 완료 슬롯 ({len(comp)})"):
+                for s in comp:
+                    rz = calc_realized(s['transactions'])
+                    pct = (rz / s['capital'] * 100) if s['capital'] else 0
+                    st.markdown(f"**{s['name']}** ({s['ticker']})")
+                    st.caption(f"수익 ${rz:.2f} ({pct:+.2f}%) · {s.get('completed_at', '-')}")
+                    cc = st.columns(2)
+                    if cc[0].button("복구", key=f"rc_{s['id']}", width='stretch'):
+                        s['status'] = 'active'
+                        s['completed_at'] = None
+                        st.rerun()
+                    if cc[1].button("삭제", key=f"dc_{s['id']}", width='stretch'):
+                        del st.session_state.slots[s['id']]
+                        st.rerun()
+                    st.markdown("---")
+
+        # 백업
+        st.markdown("---")
+        st.markdown("**💾 데이터**")
+        if st.session_state.slots:
+            export = {'slots': st.session_state.slots}
+            st.download_button(
+                "백업 다운로드",
+                json.dumps(export, ensure_ascii=False, indent=2),
+                file_name=f"mumae_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+                mime="application/json",
+                width='stretch'
+            )
+        up = st.file_uploader("백업 복원", type='json', label_visibility='collapsed')
+        if up:
+            try:
+                d = json.load(up)
+                st.session_state.slots = d['slots']
+                st.success("복원 완료")
+                st.rerun()
+            except Exception as e:
+                st.error(f"오류: {e}")
+
+        rate = fetch_rate()
+        if rate:
+            st.caption(f"💱 환율: {rate:,.2f}원")
+
+# ==========================================
+# 헤더
+# ==========================================
+def render_header():
+    st.markdown("# 🚀 무매v4.0 by Ryan")
+    acts = active_slots()
+    if not acts:
+        st.info("← 왼쪽 상단 메뉴(>>)에서 슬롯을 추가하세요")
+        return None
+    if len(acts) > 1:
+        opts = [s['name'] for s in acts]
+        sids = [s['id'] for s in acts]
+        if st.session_state.selected_slot_id not in sids:
+            st.session_state.selected_slot_id = sids[0]
+        ci = sids.index(st.session_state.selected_slot_id)
+        i = st.selectbox("슬롯", range(len(opts)),
+                         format_func=lambda x: opts[x], index=ci)
+        if sids[i] != st.session_state.selected_slot_id:
+            st.session_state.selected_slot_id = sids[i]
+            st.rerun()
+    return current_slot()
+
+# ==========================================
+# 탭1: 포트폴리오
+# ==========================================
+def tab_portfolio(s):
+    h, a, cash, _, _ = calc_holdings(s['transactions'], s['capital'])
+    cls = fetch_close(s['ticker'])
+    realized = calc_realized(s['transactions'])
+    unreal = (cls - a) * h if (cls and a) else 0
+    total_profit = realized + unreal
+
+    val = h * cls if cls else 0
+    total = cash + val
+    total_pct = ((total - s['capital']) / s['capital'] * 100) if s['capital'] else 0
+
+    pcolor = '#22c55e' if total_pct >= 0 else '#ef4444'
+    big_number("투자 수익률", f"{total_pct:+.2f}%", pcolor)
+    st.markdown("<br>", unsafe_allow_html=True)
+    big_number("투자 손익", f"{total_profit:+.2f} USD", pcolor)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    T, spl = s['T'], s['split']
+    one_buy = calc_one_buy(cash, T, spl)
+    cc = st.columns(2)
+    cc[0].metric("1회 매수금", f"${one_buy:.0f}")
+    cc[1].metric("운용 종목수", f"{len(active_slots())}개")
+
+    st.divider()
+
+    st.subheader(f"📌 {s['name']}")
+    phase = get_phase(T, spl)
+    cc = st.columns(2)
+    cc[0].metric("단계", phase_label(phase))
+    cc[1].metric("진행도", f"{T:.2f} / {spl}T")
+    cc = st.columns(2)
+    cc[0].metric("보유", f"{h}주")
+    cc[1].metric("평단", f"${a:.2f}" if a else "-")
+    cc = st.columns(2)
+    cc[0].metric("최근 종가", f"${cls:.2f}" if cls else "-")
+    cc[1].metric("잔금", f"${cash:,.0f}")
+
+    st.divider()
+
+    star_pct = calc_star_pct(T, s['ticker'], spl)
+    star_price = a * (1 + star_pct / 100) if a else 0
+
+    st.subheader("🌙 오늘의 주문")
+    if h == 0:
+        with st.container(border=True):
+            st.markdown("**🚀 처음 매수**")
+            if cls:
+                big = cls * 1.12
+                qty = int(one_buy // big) if big > 0 else 0
+                st.markdown(f"- LOC `${big:.2f}` · **{qty}주**")
+                st.caption(f"종가 ${cls:.2f}, +12%")
+            else:
+                st.warning("종가 로드 실패. 수동으로 +10~15% 위에 LOC")
+    else:
+        bp = round(star_price - 0.01, 2)
+        spct = 15 if s['ticker'] == 'TQQQ' else 20
+        target_sell = round(a * (1 + spct / 100), 2)
+        quarter = h // 4
+        rest = h - quarter
+        with st.container(border=True):
+            st.markdown(f"**🛒 매수 ({phase_label(phase)})**")
+            if phase == 'early':
+                half = one_buy / 2
+                qs = int(half // bp) if bp > 0 else 0
+                qa = int(half // a) if a > 0 else 0
+                st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
+                st.markdown(f"- 평단 LOC `${a:.2f}` · **{qa}주**")
+            elif phase == 'late':
+                qs = int(one_buy // bp) if bp > 0 else 0
+                st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
+            else:
+                st.error("⚠️ 소진모드 (리버스모드 미구현)")
+            st.caption(f"1회매수액 ${one_buy:.2f}")
+        with st.container(border=True):
+            st.markdown("**💰 매도**")
+            st.markdown(f"- ★ LOC `${star_price:.2f}` · **{quarter}주**")
+            st.markdown(f"- {spct}% 지정가 `${target_sell}` · **{rest}주**")
+
+# ==========================================
+# 탭2: 매매이력
+# ==========================================
+def tab_history(s):
+    cls = fetch_close(s['ticker'])
+
+    st.subheader("📝 체결 입력")
+    btab, stab = st.tabs(["🛒 매수", "💰 매도"])
+
+    with btab:
+        with st.form(f"buy_{s['id']}", clear_on_submit=True):
+            fd = st.date_input("날짜", value=date.today(), key=f"bd_{s['id']}")
+            cc = st.columns(2)
+            fq = cc[0].number_input("수량", min_value=1, value=1, step=1, key=f"bq_{s['id']}")
+            fp = cc[1].number_input("가격", min_value=0.01,
+                                     value=float(cls) if cls else 50.0, step=0.01, key=f"bp_{s['id']}")
+            tc = st.radio("T값 변화", ["+1 (1회 매수)", "+0.5 (절반 매수)"], key=f"btc_{s['id']}")
+            td = 1.0 if "+1" in tc else 0.5
+            new_T = s['T'] + td
+            st.caption(f"T: {s['T']:.3f} → **{new_T:.3f}**")
+            if st.form_submit_button("💾 매수 저장", width='stretch'):
+                s['transactions'].append({
+                    'date': str(fd), 'type': 'buy',
+                    'price': float(fp), 'qty': int(fq),
+                })
+                s['T'] = new_T
+                st.success("매수 저장됨")
+                st.rerun()
+
+    with stab:
+        # 현재 보유량 (전액매도용)
+        h_cur, _, _, _, _ = calc_holdings(s['transactions'], s['capital'])
+        with st.form(f"sell_{s['id']}", clear_on_submit=True):
+            fd = st.date_input("날짜", value=date.today(), key=f"sd_{s['id']}")
+            cc = st.columns(2)
+            fq = cc[0].number_input("수량", min_value=1, value=1, step=1, key=f"sq_{s['id']}")
+            fp = cc[1].number_input("가격", min_value=0.01,
+                                     value=float(cls) if cls else 50.0, step=0.01, key=f"sp_{s['id']}")
+            stp = st.radio("T값 변화",
+                           ["쿼터매도 (×0.75)",
+                            "지정가+LOC매수 (×0.25 +1)",
+                            "지정가+LOC절반 (×0.25 +0.5)",
+                            f"🏁 전액매도 ({h_cur}주, 슬롯 종료)"], key=f"sstp_{s['id']}")
+            if "0.75" in stp:
+                new_T = s['T'] * 0.75
+            elif "+1" in stp:
+                new_T = s['T'] * 0.25 + 1
+            elif "+0.5" in stp:
+                new_T = s['T'] * 0.25 + 0.5
+            else:  # 전액매도
+                new_T = s['T']
+                st.warning(f"⚠️ 보유 전량 {h_cur}주를 매도하고 슬롯 종료됩니다. 수량 입력값은 무시됨.")
+            st.caption(f"T: {s['T']:.3f} → **{new_T:.3f}**")
+            if st.form_submit_button("💾 매도 저장", width='stretch'):
+                if "전액매도" in stp:
+                    if h_cur <= 0:
+                        st.error("보유 수량이 0이라 전액매도 불가")
+                    else:
+                        s['transactions'].append({
+                            'date': str(fd), 'type': 'sell',
+                            'price': float(fp), 'qty': int(h_cur),
+                        })
+                        s['status'] = 'completed'
+                        s['completed_at'] = str(date.today())
+                        st.session_state.selected_slot_id = None
+                        st.success(f"🏁 전액매도 ({h_cur}주 × ${fp:.2f}) 완료. 슬롯 종료됨.")
+                        st.rerun()
+                else:
+                    s['transactions'].append({
+                        'date': str(fd), 'type': 'sell',
+                        'price': float(fp), 'qty': int(fq),
+                    })
+                    s['T'] = new_T
+                    st.success("매도 저장됨")
+                    st.rerun()
+
+    st.divider()
+    st.subheader("📜 매매 이력")
+    df = trans_df(s['transactions'])
+    if df.empty:
+        st.info("거래 없음")
+    else:
+        def style_row(row):
+            color = '#ef444433' if row['구분'] == '매수' else '#3b82f633'
+            return [f'background-color: {color}'] * len(row)
+        st.dataframe(df.style.apply(style_row, axis=1), hide_index=True, width='stretch')
+
+        tbq = sum(t['qty'] for t in s['transactions'] if t['type'] == 'buy')
+        tsq = sum(t['qty'] for t in s['transactions'] if t['type'] == 'sell')
+        tba = sum(t['price']*t['qty'] for t in s['transactions'] if t['type'] == 'buy')
+        tsa = sum(t['price']*t['qty'] for t in s['transactions'] if t['type'] == 'sell')
+        cc = st.columns(2)
+        cc[0].metric("총 매수", f"{tbq}주 / ${tba:,.0f}")
+        cc[1].metric("총 매도", f"{tsq}주 / ${tsa:,.0f}")
+
+        with st.expander("🛠 수정/삭제"):
+            edit_df = pd.DataFrame(s['transactions'])
+            if not edit_df.empty:
+                edited = st.data_editor(
+                    edit_df, width='stretch', num_rows="dynamic",
+                    column_config={
+                        'date': st.column_config.TextColumn('날짜'),
+                        'type': st.column_config.SelectboxColumn('구분', options=['buy', 'sell']),
+                        'price': st.column_config.NumberColumn('가격', format="%.2f"),
+                        'qty': st.column_config.NumberColumn('수량'),
+                    },
+                    key=f"ed_{s['id']}",
+                )
+                if st.button("💾 변경 저장", key=f"se_{s['id']}", width='stretch'):
+                    nt = []
+                    for _, r in edited.iterrows():
+                        try:
+                            nt.append({
+                                'date': str(r['date']),
+                                'type': r['type'],
+                                'price': float(r['price']),
+                                'qty': int(r['qty']),
+                            })
+                        except Exception:
+                            continue
+                    s['transactions'] = nt
+                    st.warning("저장됨. T값은 자동 복원 안 됨")
+                    st.rerun()
+
+# ==========================================
+# 탭3: 정산이력
+# ==========================================
+def tab_settlement(s):
+    st.subheader("💰 정산 이력")
+
+    cc = st.columns(2)
+    start = cc[0].date_input("시작일", value=date.today() - timedelta(days=90), key=f"st_{s['id']}")
+    end = cc[1].date_input("종료일", value=date.today(), key=f"et_{s['id']}")
+
+    realized_list = []
+    h, a = 0, 0.0
+    for t in sorted(s['transactions'], key=lambda x: x['date']):
+        if t['type'] == 'buy':
+            new_total = a * h + t['price'] * t['qty']
+            h += t['qty']
+            a = new_total / h if h > 0 else 0
+        else:
+            r = (t['price'] - a) * t['qty']
+            realized_list.append({
+                '날짜': t['date'],
+                '매도가': round(t['price'], 2),
+                '수량': t['qty'],
+                '당시평단': round(a, 2),
+                '실현수익': round(r, 2),
+            })
+            h -= t['qty']
+            if h <= 0:
+                h, a = 0, 0
+
+    try:
+        filtered = [x for x in realized_list
+                    if start <= datetime.fromisoformat(x['날짜']).date() <= end]
+    except Exception:
+        filtered = []
+
+    total = sum(x['실현수익'] for x in filtered)
+    color = '#22c55e' if total >= 0 else '#ef4444'
+    big_number("기간 실현 수익", f"{total:+.2f} USD", color)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if not filtered:
+        st.info(f"{start} ~ {end} 정산 내역 없음")
+        return
+
+    df = pd.DataFrame(filtered).iloc[::-1].reset_index(drop=True)
+    st.dataframe(df, hide_index=True, width='stretch')
+
+# ==========================================
+# 라우팅
+# ==========================================
+render_sidebar()
+cur = render_header()
+if cur:
+    t1, t2, t3 = st.tabs(["📊 포트폴리오", "📝 매매이력", "💰 정산이력"])
+    with t1:
+        tab_portfolio(cur)
+    with t2:
+        tab_history(cur)
+    with t3:
+        tab_settlement(cur)
