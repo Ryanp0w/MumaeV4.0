@@ -5,6 +5,7 @@
 - 슬롯 없을 때 SOXL 종가 + 환율 표시
 """
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import yfinance as yf
 import requests
@@ -22,15 +23,40 @@ st.set_page_config(
 )
 
 # ==========================================
-# URL 사용자 인증
+# URL 사용자 인증 (+ localStorage 자동 기억)
 # ==========================================
 query_params = st.query_params
 user = query_params.get('user', None)
 
+if user:
+    # URL에 user 있음 → localStorage에 저장 (다음 방문 시 사용)
+    components.html(f"""
+    <script>
+      try {{
+        localStorage.setItem('mumae_user', {json.dumps(user)});
+      }} catch(e) {{ console.log('Storage error:', e); }}
+    </script>
+    """, height=0, width=0)
+else:
+    # URL에 user 없음 → localStorage에서 가져와 redirect 시도
+    components.html("""
+    <script>
+      try {
+        const saved = localStorage.getItem('mumae_user');
+        if (saved && saved.length >= 4) {
+          const parentLoc = window.parent.location;
+          const url = new URL(parentLoc.href);
+          url.searchParams.set('user', saved);
+          parentLoc.replace(url.toString());
+        }
+      } catch(e) { console.log('Storage error:', e); }
+    </script>
+    """, height=0, width=0)
+
 if not user:
-    st.title("🔒 접근 거부")
+    st.title("🔒 접근")
     st.markdown("URL에 `?user=본인코드` 가 필요합니다.")
-    st.caption("관리자에게 본인 코드를 발급받아 사용하세요.")
+    st.caption("저장된 코드 확인 중... 2초 후에도 이 화면이 보이면 ?user=본인코드 로 다시 접속하세요.")
     st.stop()
 
 if not user.replace('_', '').isalnum() or not (4 <= len(user) <= 50):
