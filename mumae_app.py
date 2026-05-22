@@ -652,6 +652,56 @@ def render_reverse_orders(s, h, a, cash, cls):
 # ==========================================
 # 탭 2: 매매이력
 # ==========================================
+# ==========================================
+# 매도 결과 모달
+# ==========================================
+@st.dialog("🏁 매도 결과")
+def sell_result_dialog():
+    info = st.session_state.get('pending_sell_dialog')
+    if not info:
+        return
+
+    slot = st.session_state.slots.get(info['slot_id'])
+    if not slot:
+        return
+
+    sell_type = info['sell_type']  # 'quarter', 'fixed', 'reverse', 'full'
+
+    realized = calc_realized(slot['transactions'])
+    pct = (realized / slot['capital'] * 100) if slot['capital'] else 0
+
+    st.markdown(f"### {slot['name']} ({slot['ticker']})")
+
+    # 이미지 분기
+    if realized < 0:
+        img_file = "images/sad.jpg"
+    elif sell_type == 'full':
+        img_file = "images/happy2.jpg"
+    else:
+        img_file = "images/happy1.jpg"
+
+    try:
+        st.image(img_file, width='stretch')
+    except Exception:
+        pass
+
+    color = '#22c55e' if realized >= 0 else '#ef4444'
+    st.markdown(
+        f"<div style='text-align: center; padding: 10px 0;'>"
+        f"<div style='font-size: 14px; color: #888;'>실현 수익</div>"
+        f"<div style='font-size: 36px; font-weight: bold; color: {color};'>"
+        f"{realized:+.2f} USD</div>"
+        f"<div style='font-size: 20px; color: {color}; margin-top: 5px;'>"
+        f"({pct:+.2f}%)</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
+    if st.button("확인", width='stretch', key="dialog_confirm"):
+        del st.session_state['pending_sell_dialog']
+        st.rerun()
+
+
 def tab_history(s):
     cls = fetch_close(s['ticker'])
     mode = s.get('mode', 'normal')
@@ -743,6 +793,7 @@ def tab_history(s):
                     if h_cur <= 0:
                         st.error("보유 수량이 0이라 전액매도 불가")
                     else:
+                        slot_id_to_show = s['id']
                         s['transactions'].append({
                             'date': str(fd), 'type': 'sell',
                             'price': float(fp), 'qty': int(h_cur),
@@ -752,7 +803,10 @@ def tab_history(s):
                         s['completed_at'] = str(date.today())
                         st.session_state.selected_slot_id = None
                         persist()
-                        st.success(f"🏁 전액매도 ({h_cur}주 × ${fp:.2f}) 완료. 슬롯 종료됨.")
+                        st.session_state['pending_sell_dialog'] = {
+                            'slot_id': slot_id_to_show,
+                            'sell_type': 'full',
+                        }
                         st.rerun()
                 else:
                     s['transactions'].append({
@@ -762,7 +816,17 @@ def tab_history(s):
                     })
                     s['T'] = new_T
                     persist()
-                    st.success("매도 저장됨")
+                    # 매도 종류 분류
+                    if tx_mode == 'reverse':
+                        sell_type_label = 'reverse'
+                    elif "0.75" in stp:
+                        sell_type_label = 'quarter'
+                    else:
+                        sell_type_label = 'fixed'
+                    st.session_state['pending_sell_dialog'] = {
+                        'slot_id': s['id'],
+                        'sell_type': sell_type_label,
+                    }
                     st.rerun()
 
     st.divider()
@@ -967,14 +1031,20 @@ def tab_slot_management():
         cls = fetch_close(cur['ticker'])
         if h > 0 and cls:
             if st.button(f"🏁 전량매도 (${cls:.2f}) & 슬롯 종료", width='stretch', key=f"end_{cur['id']}"):
+                slot_id_to_show = cur['id']
                 cur['transactions'].append({
                     'date': str(date.today()), 'type': 'sell',
-                    'price': float(cls), 'qty': int(h)
+                    'price': float(cls), 'qty': int(h),
+                    'mode': cur.get('mode', 'normal'),
                 })
                 cur['status'] = 'completed'
                 cur['completed_at'] = str(date.today())
                 st.session_state.selected_slot_id = None
                 persist()
+                st.session_state['pending_sell_dialog'] = {
+                    'slot_id': slot_id_to_show,
+                    'sell_type': 'full',
+                }
                 st.rerun()
         elif h == 0:
             if st.button("🏁 슬롯 종료 (보유 0)", width='stretch', key=f"end0_{cur['id']}"):
@@ -1057,3 +1127,7 @@ else:
         tab_settlement(cur)
     with t4:
         tab_slot_management()
+
+# 매도 결과 모달 (페이지 최상위에서 호출)
+if st.session_state.get('pending_sell_dialog'):
+    sell_result_dialog()
