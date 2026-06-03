@@ -98,11 +98,13 @@ def get_spreadsheet():
 
 def get_or_create_ws(name, headers):
     ss = get_spreadsheet()
-    try:
-        ws = ss.worksheet(name)
-    except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(title=name, rows=1000, cols=len(headers))
-        ws.update(values=[headers], range_name='A1')
+    # case-insensitive 검색: 대소문자 다른 같은 이름 시트가 있으면 그걸 사용
+    for ws in ss.worksheets():
+        if ws.title.lower() == name.lower():
+            return ws
+    # 없으면 새로 생성
+    ws = ss.add_worksheet(title=name, rows=1000, cols=len(headers))
+    ws.update(values=[headers], range_name='A1')
     return ws
 
 def load_user_data(u):
