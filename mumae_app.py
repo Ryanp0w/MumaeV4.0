@@ -30,6 +30,14 @@ cookie_manager = stx.CookieManager(key='mumae_cookie_manager')
 query_params = st.query_params
 user = query_params.get('user', None)
 
+# 대소문자 통일 (모두 소문자로)
+if user:
+    user_lower = user.lower()
+    if user != user_lower:
+        st.query_params['user'] = user_lower
+        st.rerun()
+    user = user_lower
+
 # URL에 user 있으면 → 쿠키에 저장 (다음 PWA/접속 시 자동 사용)
 if user:
     cookie_manager.set('mumae_user', user, key='save_url_cookie')
@@ -38,7 +46,7 @@ if user:
 if not user:
     saved = cookie_manager.get('mumae_user')
     if saved and isinstance(saved, str) and 4 <= len(saved) <= 50 and saved.replace('_', '').isalnum():
-        st.query_params['user'] = saved
+        st.query_params['user'] = saved.lower()
         st.rerun()
 
 # 그래도 user 없으면 로그인 폼
@@ -49,7 +57,7 @@ if not user:
         code = st.text_input("사용자 코드", placeholder="예: 23xfkdvc")
         submitted = st.form_submit_button("접속", width='stretch')
         if submitted:
-            code = code.strip()
+            code = code.strip().lower()  # 대소문자 통일
             if code and code.replace('_', '').isalnum() and 4 <= len(code) <= 50:
                 cookie_manager.set('mumae_user', code, key='save_login_cookie')
                 st.query_params['user'] = code
