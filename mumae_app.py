@@ -511,7 +511,7 @@ def render_header():
 # ==========================================
 def tab_portfolio(s):
     # === 계산 ===
-    h, a, cash, _, _ = calc_holdings(s['transactions'], s['capital'])
+    h, a, cash, used, rev = calc_holdings(s['transactions'], s['capital'])
     cls = fetch_close(s['ticker'])
     realized = calc_realized(s['transactions'])
     unreal = (cls - a) * h if (cls and a) else 0
@@ -519,7 +519,8 @@ def tab_portfolio(s):
 
     val = h * cls if cls else 0
     total = cash + val
-    total_pct = ((total - s['capital']) / s['capital'] * 100) if s['capital'] else 0
+    # 수익률: 실제 투입한 금액 (used = 누적 매수 금액) 대비
+    total_pct = (total_profit / used * 100) if used else 0
 
     T, spl = s['T'], s['split']
     one_buy = calc_one_buy(cash, T, spl)
@@ -667,8 +668,9 @@ def sell_result_dialog():
 
     sell_type = info['sell_type']  # 'quarter', 'fixed', 'reverse', 'full'
 
+    h, a, cash, used, rev = calc_holdings(slot['transactions'], slot['capital'])
     realized = calc_realized(slot['transactions'])
-    pct = (realized / slot['capital'] * 100) if slot['capital'] else 0
+    pct = (realized / used * 100) if used else 0
 
     st.markdown(f"### {slot['name']} ({slot['ticker']})")
 
@@ -881,31 +883,36 @@ def tab_history(s):
 # ==========================================
 # 탭 3: 정산이력
 # ==========================================
-def tab_settlement(s):
-    st.subheader("💰 정산 이력")
+def tab_settlement(s=None):
+    """모든 슬롯(active + completed)의 매도 거래 통합 정산"""
+    st.subheader("💰 정산 이력 (전체 슬롯)")
     cc = st.columns(2)
-    start = cc[0].date_input("시작일", value=date.today() - timedelta(days=90), key=f"st_{s['id']}")
-    end = cc[1].date_input("종료일", value=date.today(), key=f"et_{s['id']}")
+    start = cc[0].date_input("시작일", value=date.today() - timedelta(days=90), key="settlement_start")
+    end = cc[1].date_input("종료일", value=date.today(), key="settlement_end")
 
     realized_list = []
-    h, a = 0, 0.0
-    for t in sorted(s['transactions'], key=lambda x: x['date']):
-        if t['type'] == 'buy':
-            new_total = a * h + t['price'] * t['qty']
-            h += t['qty']
-            a = new_total / h if h > 0 else 0
-        else:
-            r = (t['price'] - a) * t['qty']
-            realized_list.append({
-                '날짜': t['date'],
-                '매도가': round(t['price'], 2),
-                '수량': t['qty'],
-                '당시평단': round(a, 2),
-                '실현수익': round(r, 2),
-            })
-            h -= t['qty']
-            if h <= 0:
-                h, a = 0, 0
+    # 모든 슬롯 순회
+    for slot in st.session_state.slots.values():
+        h, a = 0, 0.0
+        for t in sorted(slot['transactions'], key=lambda x: x['date']):
+            if t['type'] == 'buy':
+                new_total = a * h + t['price'] * t['qty']
+                h += t['qty']
+                a = new_total / h if h > 0 else 0
+            else:
+                r = (t['price'] - a) * t['qty']
+                realized_list.append({
+                    '날짜': t['date'],
+                    '슬롯': slot['name'],
+                    '종목': slot['ticker'],
+                    '매도가': round(t['price'], 2),
+                    '수량': t['qty'],
+                    '당시평단': round(a, 2),
+                    '실현수익': round(r, 2),
+                })
+                h -= t['qty']
+                if h <= 0:
+                    h, a = 0, 0
 
     try:
         filtered = [x for x in realized_list
@@ -922,7 +929,9 @@ def tab_settlement(s):
         st.info(f"{start} ~ {end} 정산 내역 없음")
         return
 
-    df = pd.DataFrame(filtered).iloc[::-1].reset_index(drop=True)
+    # 최신순 정렬
+    df = pd.DataFrame(filtered)
+    df = df.sort_values('날짜', ascending=False).reset_index(drop=True)
     st.dataframe(df, hide_index=True, width='stretch')
 
 # ==========================================
@@ -1069,7 +1078,8 @@ def tab_slot_management():
         st.subheader(f"🏁 완료된 슬롯 ({len(comp)}개)")
         for s in comp:
             rz = calc_realized(s['transactions'])
-            pct = (rz / s['capital'] * 100) if s['capital'] else 0
+            _, _, _, used_c, _ = calc_holdings(s['transactions'], s['capital'])
+            pct = (rz / used_c * 100) if used_c else 0
             with st.expander(f"{s['name']} ({s['ticker']}) · ${rz:.2f} ({pct:+.2f}%)"):
                 st.caption(f"기간: {s['created_at']} → {s.get('completed_at', '-')}")
                 cc = st.columns(2)
