@@ -84,7 +84,8 @@ SCOPES = [
 
 SLOT_HEADERS = ['id', 'name', 'ticker', 'capital', 'split', 'target_profit',
                 'T', 'mode', 'reverse_entered_at', 'manual_reverse_star',
-                'status', 'created_at', 'completed_at']
+                'status', 'created_at', 'completed_at',
+                'extra_buy_levels', 'extra_buy_pct_step']
 TX_HEADERS = ['slot_id', 'date', 'type', 'price', 'qty', 'mode']
 
 @st.cache_resource(show_spinner=False)
@@ -132,6 +133,8 @@ def load_user_data(u):
             'status': str(r.get('status', 'active')),
             'created_at': str(r.get('created_at', '')),
             'completed_at': (str(r['completed_at']) if r.get('completed_at') else None),
+            'extra_buy_levels': int(r.get('extra_buy_levels') or 3),
+            'extra_buy_pct_step': float(r.get('extra_buy_pct_step') or 5.0),
             'transactions': [],
         }
     for r in txs_rows:
@@ -163,6 +166,8 @@ def save_user_data(u, slots):
             s.get('manual_reverse_star') or '',
             s['status'], s['created_at'],
             s.get('completed_at') or '',
+            s.get('extra_buy_levels', 3),
+            s.get('extra_buy_pct_step', 5.0),
         ])
     slots_ws.clear()
     slots_ws.update(values=slot_rows, range_name='A1')
@@ -238,6 +243,38 @@ def calc_star_pct(T, ticker, split):
 def calc_one_buy(cash, T, split):
     d = split - T
     return cash / d if d > 0 else 0
+
+def calc_extra_buy_tiers(base_price, target_budget, existing_cum_qty, num_tiers, pct_step):
+    """
+    별지점/평단 등 기존 매수 지점 아래로 추가 LOC 매수 지점을 계산.
+    각 지점까지 가격이 떨어졌을 때, 그 지점까지의 누적 매수금액이
+    target_budget(1회매수액)에 최대한 가깝도록 수량을 누적 계산.
+
+    예) 1회매수액 600, 평단 200, 별지점 220 (전반전, 각 300씩 배정)
+        기존: 별지점 220에서 1주(300/220=1.36→1), 평단 200에서 1주(300/200=1.5→1)
+        기존 누적 수량 = 2주, 기존 누적 사용액 = 220+200 = 420 (실제 체결가 기준으로는 더 적을 수 있음)
+        추가 지점(평단 아래 -5%=190): 600/190=3.15→3주 누적 목표. 기존 2주 빼면 +1주
+        추가 지점(-10%=180): 600/180=3.33→3주. 기존 3주면 +0주
+        추가 지점(-15%=170): 600/170=3.52→3주. 추가 없음
+        → 실제 종가 150이면 위 지점들 다 체결되어 총 3~4주 매수, 300+300=600 예산 최대한 사용
+    """
+    tiers = []
+    if base_price <= 0 or target_budget <= 0:
+        return tiers
+    cum_qty = existing_cum_qty
+    price = base_price
+    for _ in range(num_tiers):
+        price = round(price * (1 - pct_step / 100), 2)
+        if price <= 0:
+            break
+        total_qty_at_price = int(target_budget // price)
+        qty_here = total_qty_at_price - cum_qty
+        if qty_here < 0:
+            qty_here = 0
+        if qty_here > 0:
+            tiers.append({'price': price, 'qty': qty_here})
+            cum_qty += qty_here
+    return tiers
 
 def get_phase(T, split):
     if T >= split - 1:
@@ -406,6 +443,8 @@ def create_slot(name, ticker, capital, split, target_profit):
         'status': 'active',
         'created_at': str(date.today()),
         'completed_at': None,
+        'extra_buy_levels': 3,
+        'extra_buy_pct_step': 5.0,
     }
     return sid
 
@@ -563,17 +602,35 @@ def tab_portfolio(s):
             rest = h - quarter
             with st.container(border=True):
                 st.markdown(f"**🛒 매수 ({phase_label(phase)})**")
+                extra_n = s.get('extra_buy_levels', 3)
+                extra_step = s.get('extra_buy_pct_step', 5.0)
                 if phase == 'early':
                     half = one_buy / 2
                     qs = int(half // bp) if bp > 0 else 0
                     qa = int(half // a) if a > 0 else 0
                     st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
                     st.markdown(f"- 평단 LOC `${a:.2f}` · **{qa}주**")
+                    # 평단(낮은 쪽 기준가) 아래로 추가 LOC 매수 지점
+                    base_for_extra = min(bp, a) if a > 0 else bp
+                    existing_cum = qs + qa
                 elif phase == 'late':
                     qs = int(one_buy // bp) if bp > 0 else 0
                     st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
+                    base_for_extra = bp
+                    existing_cum = qs
                 else:
                     st.error("⚠️ 소진 도달. 다음 매수 저장 시 자동 리버스 전환됩니다.")
+                    base_for_extra = None
+                    existing_cum = 0
+
+                if phase in ('early', 'late') and base_for_extra:
+                    extra_tiers = calc_extra_buy_tiers(
+                        base_for_extra, one_buy, existing_cum, extra_n, extra_step
+                    )
+                    if extra_tiers:
+                        st.markdown("　↓ *추가 LOC 매수 (급락 대비, 1회매수액 소진용)*")
+                        for t in extra_tiers:
+                            st.markdown(f"　　- LOC `${t['price']}` · **{t['qty']}주**")
                 st.caption(f"1회매수액 ${one_buy:.2f}")
             with st.container(border=True):
                 st.markdown("**💰 매도**")
@@ -1029,9 +1086,18 @@ def tab_slot_management():
             nspl = cc[1].selectbox("분할", [20, 30, 40],
                                  index=[20,30,40].index(cur['split']) if cur['split'] in [20,30,40] else 2)
             ntp = st.number_input("목표 수익률 (%)", min_value=1.0, value=float(cur['target_profit']), step=1.0)
+            st.markdown("**🪜 추가 LOC 매수 지점 (급락 대비)**")
+            cc2 = st.columns(2)
+            n_extra = cc2[0].number_input("지점 개수", min_value=0, max_value=10,
+                                           value=int(cur.get('extra_buy_levels', 3)), step=1)
+            pct_extra = cc2[1].number_input("지점 간격 (%)", min_value=1.0, max_value=30.0,
+                                             value=float(cur.get('extra_buy_pct_step', 5.0)), step=0.5)
+            st.caption("별지점/평단 매수는 그대로 두고, 그 아래로 추가 LOC 매수 지점을 둬서 급락 시 1회매수액을 최대한 소진해요.")
             if st.form_submit_button("💾 설정 저장", width='stretch'):
                 cur.update({'name': nn, 'ticker': ntk, 'capital': nc,
-                            'split': nspl, 'target_profit': ntp})
+                            'split': nspl, 'target_profit': ntp,
+                            'extra_buy_levels': int(n_extra),
+                            'extra_buy_pct_step': float(pct_extra)})
                 persist()
                 st.success("저장됨")
                 st.rerun()
