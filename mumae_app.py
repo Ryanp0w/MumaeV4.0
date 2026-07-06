@@ -479,8 +479,8 @@ def big_number_row(items):
     for label, value_str, color in items:
         cells += (
             f"<div style='flex: 1; text-align: center; padding: 4px 2px; min-width: 0;'>"
-            f"<div style='font-size: 12px; color: #888; margin-bottom: 4px;'>{label}</div>"
-            f"<div style='font-size: 26px; font-weight: bold; color: {color}; line-height: 1.15; "
+            f"<div style='font-size: 13px; color: #888; margin-bottom: 4px;'>{label}</div>"
+            f"<div style='font-size: 34px; font-weight: bold; color: {color}; line-height: 1.15; "
             f"white-space: nowrap;'>{value_str}</div>"
             f"</div>"
         )
@@ -696,7 +696,7 @@ def tab_portfolio(s):
         ("현재가", f"${cls:.2f}" if cls else "-"),
         ("잔금", f"${cash:,.0f}"),
         ("운용 종목수", f"{len(active_slots())}개"),
-    ], columns=2)
+    ], columns=3)
 
 def render_reverse_orders(s, h, a, cash, cls):
     """리버스 모드 주문 가이드"""
