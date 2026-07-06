@@ -585,87 +585,85 @@ def tab_portfolio(s):
     else:
         st.subheader("🌙 오늘의 주문")
         if h == 0:
-            with st.container(border=True):
-                st.markdown("**🚀 처음 매수**")
-                if cls:
-                    big = cls * 1.12
-                    qty = int(one_buy // big) if big > 0 else 0
-                    st.markdown(f"- LOC `${big:.2f}` · **{qty}주**")
-                    st.caption(f"종가 ${cls:.2f}, +12%")
-                else:
-                    st.warning("종가 로드 실패. 수동으로 +10~15% 위에 LOC")
+            st.markdown("**🚀 처음 매수**")
+            if cls:
+                big = cls * 1.12
+                qty = int(one_buy // big) if big > 0 else 0
+                df = pd.DataFrame([{"구분": "LOC (+12%)", "가격": f"${big:.2f}", "수량": f"{qty}주"}])
+                st.dataframe(df, hide_index=True, width='stretch')
+                st.caption(f"종가 ${cls:.2f} 기준")
+            else:
+                st.warning("종가 로드 실패. 수동으로 +10~15% 위에 LOC")
         else:
             bp = round(star_price - 0.01, 2)
             spct = 15 if s['ticker'] == 'TQQQ' else 20
             target_sell = round(a * (1 + spct / 100), 2)
             quarter = h // 4
             rest = h - quarter
-            with st.container(border=True):
-                st.markdown(f"**🛒 매수 ({phase_label(phase)})**")
-                extra_n = s.get('extra_buy_levels', 3)
-                extra_step = s.get('extra_buy_pct_step', 5.0)
-                if phase == 'early':
-                    half = one_buy / 2
-                    qs = int(half // bp) if bp > 0 else 0
-                    qa = int(half // a) if a > 0 else 0
-                    st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
-                    st.markdown(f"- 평단 LOC `${a:.2f}` · **{qa}주**")
-                    # 평단(낮은 쪽 기준가) 아래로 추가 LOC 매수 지점
-                    base_for_extra = min(bp, a) if a > 0 else bp
-                    existing_cum = qs + qa
-                elif phase == 'late':
-                    qs = int(one_buy // bp) if bp > 0 else 0
-                    st.markdown(f"- ★ LOC `${bp}` · **{qs}주**")
-                    base_for_extra = bp
-                    existing_cum = qs
-                else:
-                    st.error("⚠️ 소진 도달. 다음 매수 저장 시 자동 리버스 전환됩니다.")
-                    base_for_extra = None
-                    existing_cum = 0
 
-                if phase in ('early', 'late') and base_for_extra:
-                    extra_tiers = calc_extra_buy_tiers(
-                        base_for_extra, one_buy, existing_cum, extra_n, extra_step
-                    )
-                    if extra_tiers:
-                        st.markdown("　↓ *추가 LOC 매수 (급락 대비, 1회매수액 소진용)*")
-                        for t in extra_tiers:
-                            st.markdown(f"　　- LOC `${t['price']}` · **{t['qty']}주**")
+            st.markdown(f"**🛒 매수** · {phase_label(phase)}")
+            extra_n = s.get('extra_buy_levels', 3)
+            extra_step = s.get('extra_buy_pct_step', 5.0)
+            buy_rows = []
+            if phase == 'early':
+                half = one_buy / 2
+                qs = int(half // bp) if bp > 0 else 0
+                qa = int(half // a) if a > 0 else 0
+                buy_rows.append({"구분": "★ 별지점", "가격": f"${bp}", "수량": f"{qs}주"})
+                buy_rows.append({"구분": "평단", "가격": f"${a:.2f}", "수량": f"{qa}주"})
+                base_for_extra = min(bp, a) if a > 0 else bp
+                existing_cum = qs + qa
+            elif phase == 'late':
+                qs = int(one_buy // bp) if bp > 0 else 0
+                buy_rows.append({"구분": "★ 별지점", "가격": f"${bp}", "수량": f"{qs}주"})
+                base_for_extra = bp
+                existing_cum = qs
+            else:
+                base_for_extra = None
+                existing_cum = 0
+
+            if phase in ('early', 'late') and base_for_extra:
+                extra_tiers = calc_extra_buy_tiers(
+                    base_for_extra, one_buy, existing_cum, extra_n, extra_step
+                )
+                for t in extra_tiers:
+                    buy_rows.append({"구분": "추가 LOC 매수", "가격": f"${t['price']}", "수량": f"{t['qty']}주"})
+
+            if phase == 'sojin':
+                st.error("⚠️ 소진 도달 · 다음 매수 저장 시 자동 리버스 전환")
+            else:
+                st.dataframe(pd.DataFrame(buy_rows), hide_index=True, width='stretch')
                 st.caption(f"1회매수액 ${one_buy:.2f}")
-            with st.container(border=True):
-                st.markdown("**💰 매도**")
-                st.markdown(f"- ★ LOC `${star_price:.2f}` · **{quarter}주**")
-                st.markdown(f"- {spct}% 지정가 `${target_sell}` · **{rest}주**")
+
+            st.markdown("**💰 매도**")
+            sell_df = pd.DataFrame([
+                {"구분": "★ 별지점", "가격": f"${star_price:.2f}", "수량": f"{quarter}주"},
+                {"구분": f"{spct}% 지정가", "가격": f"${target_sell}", "수량": f"{rest}주"},
+            ])
+            st.dataframe(sell_df, hide_index=True, width='stretch')
 
     st.divider()
 
-    # === 2. 투자 수익률 / 손익 ===
+    # === 2. 투자 수익률 (핵심 지표, 크게) ===
     pcolor = '#ef4444' if total_pct >= 0 else '#3b82f6'
     big_number("투자 수익률", f"{total_pct:+.2f}%", pcolor)
     st.markdown("<br>", unsafe_allow_html=True)
-    big_number("투자 손익", f"{total_profit:+.2f} USD", pcolor)
-    st.markdown("<br>", unsafe_allow_html=True)
 
-    # === 3. 1회 매수금 / 운용 종목수 ===
-    cc = st.columns(2)
-    cc[0].metric("1회 매수금", f"${one_buy:.0f}")
-    cc[1].metric("운용 종목수", f"{len(active_slots())}개")
-
-    # === 4. 슬롯 상세 ===
-    st.divider()
+    # === 3. 나머지 현황을 표 하나로 정리 ===
+    status_rows = [
+        {"항목": "투자 손익", "값": f"{total_profit:+.2f} USD"},
+        {"항목": "1회 매수금", "값": f"${one_buy:.0f}"},
+        {"항목": "모드" if mode == 'reverse' else "단계",
+         "값": "🔄 리버스" if mode == 'reverse' else phase_label(phase)},
+        {"항목": "진행도", "값": f"{T:.2f} / {spl}T"},
+        {"항목": "보유", "값": f"{h}주"},
+        {"항목": "평단", "값": f"${a:.2f}" if a else "-"},
+        {"항목": "현재가", "값": f"${cls:.2f}" if cls else "-"},
+        {"항목": "잔금", "값": f"${cash:,.0f}"},
+        {"항목": "운용 종목수", "값": f"{len(active_slots())}개"},
+    ]
     st.subheader(f"📌 {s['name']}")
-    cc = st.columns(2)
-    if mode == 'reverse':
-        cc[0].metric("모드", "🔄 리버스")
-    else:
-        cc[0].metric("단계", phase_label(phase))
-    cc[1].metric("진행도", f"{T:.2f} / {spl}T")
-    cc = st.columns(2)
-    cc[0].metric("보유", f"{h}주")
-    cc[1].metric("평단", f"${a:.2f}" if a else "-")
-    cc = st.columns(2)
-    cc[0].metric("현재가", f"${cls:.2f}" if cls else "-")
-    cc[1].metric("잔금", f"${cash:,.0f}")
+    st.dataframe(pd.DataFrame(status_rows), hide_index=True, width='stretch')
 
 def render_reverse_orders(s, h, a, cash, cls):
     """리버스 모드 주문 가이드"""
@@ -680,42 +678,35 @@ def render_reverse_orders(s, h, a, cash, cls):
     exit_ok, threshold = check_reverse_exit(s, cls)
     pct = 15 if s['ticker'] == 'TQQQ' else 20
 
-    # 상태 박스
-    with st.container(border=True):
-        st.markdown("**📍 리버스 상태**")
-        if star:
-            st.markdown(f"- 별지점: `${star:.2f}` ({star_source})")
-        else:
-            st.markdown("- 별지점: 조회 실패 — 슬롯 관리 탭에서 수동 입력")
-        if a and threshold:
-            st.markdown(f"- 종료조건: 종가 > `${threshold:.2f}` (평단 -{pct}%)")
-        if exit_ok:
-            st.success("✅ 종료조건 충족! 슬롯 관리 탭에서 **일반모드 복귀** 가능")
+    # 상태
+    status_rows = [{"항목": "별지점", "값": f"${star:.2f} ({star_source})" if star else "조회 실패"}]
+    if a and threshold:
+        status_rows.append({"항목": "종료조건", "값": f"종가 > ${threshold:.2f} (평단 -{pct}%)"})
+    st.dataframe(pd.DataFrame(status_rows), hide_index=True, width='stretch')
+    if exit_ok:
+        st.success("✅ 종료조건 충족! 슬롯 관리 탭에서 일반모드 복귀 가능")
 
     # 매도
     sell_qty = calc_reverse_sell_qty(h, s['split'])
     divisor = 10 if s['split'] == 20 else 20
-    with st.container(border=True):
-        if is_first:
-            st.markdown(f"**💰 처음 매도 (MOC 무조건 매도)**")
-            st.markdown(f"- **MOC 매도** {sell_qty}주 (보유 {h}주 × 1/{divisor})")
-            st.caption("MOC = 시장가 종가매도. 무조건 체결.")
-        else:
-            st.markdown(f"**💰 매도 (별지점 위 LOC)**")
-            if star:
-                st.markdown(f"- LOC `${star:.2f}` 위 · **{sell_qty}주** (직전보유 × 1/{divisor})")
-            else:
-                st.markdown(f"- 별지점 위에 LOC · **{sell_qty}주**")
+    if is_first:
+        st.markdown("**💰 처음 매도** · MOC 무조건 체결")
+        df = pd.DataFrame([{"구분": "MOC 매도", "가격": "시장가", "수량": f"{sell_qty}주"}])
+        st.dataframe(df, hide_index=True, width='stretch')
+        st.caption(f"보유 {h}주 × 1/{divisor}")
+    else:
+        st.markdown("**💰 매도** · 별지점 위 LOC")
+        df = pd.DataFrame([{"구분": "★ 별지점 위", "가격": f"${star:.2f}" if star else "-", "수량": f"{sell_qty}주"}])
+        st.dataframe(df, hide_index=True, width='stretch')
+        st.caption(f"직전보유 × 1/{divisor}")
 
     # 매수 (첫날 제외)
     if not is_first:
         qbuy = cash / 4
-        with st.container(border=True):
-            st.markdown("**🛒 쿼터매수 (별지점 아래 LOC)**")
-            st.markdown(f"- 총 매수금: `${qbuy:.2f}` (잔금 ${cash:.2f} ÷ 4)")
-            if star:
-                st.caption(f"별지점 ${star:.2f} 아래에서 LOC 분산 매수")
-            st.caption("매수 가격대는 본인 재량으로 분산")
+        st.markdown("**🛒 쿼터매수** · 별지점 아래 LOC")
+        df = pd.DataFrame([{"구분": "쿼터매수", "가격": f"${star:.2f} 아래" if star else "재량", "수량": f"${qbuy:.2f}"}])
+        st.dataframe(df, hide_index=True, width='stretch')
+        st.caption("잔금 ÷ 4, 가격대는 재량으로 분산")
 
 # ==========================================
 # 탭 2: 매매이력
