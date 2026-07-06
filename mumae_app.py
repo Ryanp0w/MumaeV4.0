@@ -473,13 +473,35 @@ def big_number(label, value_str, color):
         unsafe_allow_html=True
     )
 
-def big_number_sm(label, value_str, color):
-    """2열 배치용 - 폰트 살짝 작게"""
+def big_number_row(items):
+    """items: [(label, value_str, color), ...] - 항상 가로로 강제 배치 (HTML flex, Streamlit columns 아님)"""
+    cells = ""
+    for label, value_str, color in items:
+        cells += (
+            f"<div style='flex: 1; text-align: center; padding: 4px 2px; min-width: 0;'>"
+            f"<div style='font-size: 12px; color: #888; margin-bottom: 4px;'>{label}</div>"
+            f"<div style='font-size: 26px; font-weight: bold; color: {color}; line-height: 1.15; "
+            f"white-space: nowrap;'>{value_str}</div>"
+            f"</div>"
+        )
     st.markdown(
-        f"<div style='text-align: center; padding: 4px 0;'>"
-        f"<div style='font-size: 12px; color: #888; margin-bottom: 4px;'>{label}</div>"
-        f"<div style='font-size: 26px; font-weight: bold; color: {color}; line-height: 1.1;'>{value_str}</div>"
-        f"</div>",
+        f"<div style='display: flex; width: 100%;'>{cells}</div>",
+        unsafe_allow_html=True
+    )
+
+def metric_grid(items, columns=2):
+    """items: [(label, value_str), ...] - CSS grid로 화면 폭 상관없이 고정 열 유지"""
+    cells = ""
+    for label, value_str in items:
+        cells += (
+            f"<div style='padding: 6px 4px; min-width: 0;'>"
+            f"<div style='font-size: 13px; color: #888; margin-bottom: 2px;'>{label}</div>"
+            f"<div style='font-size: 21px; font-weight: 600; overflow-wrap: break-word;'>{value_str}</div>"
+            f"</div>"
+        )
+    st.markdown(
+        f"<div style='display: grid; grid-template-columns: repeat({columns}, 1fr); "
+        f"column-gap: 8px; row-gap: 4px;'>{cells}</div>",
         unsafe_allow_html=True
     )
 
@@ -654,35 +676,27 @@ def tab_portfolio(s):
 
     st.divider()
 
-    # === 2. 투자 수익률 / 손익 (핵심 지표, 2열) ===
+    # === 2. 투자 수익률 / 손익 (핵심 지표, 강제 2열) ===
     pcolor = '#ef4444' if total_pct >= 0 else '#3b82f6'
-    cc = st.columns(2)
-    with cc[0]:
-        big_number_sm("투자 수익률", f"{total_pct:+.2f}%", pcolor)
-    with cc[1]:
-        big_number_sm("투자 손익", f"{total_profit:+.2f} USD", pcolor)
+    big_number_row([
+        ("투자 수익률", f"{total_pct:+.2f}%", pcolor),
+        ("투자 손익", f"{total_profit:+.2f} USD", pcolor),
+    ])
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # === 3. 나머지 현황 (2열 그리드) ===
+    # === 3. 나머지 현황 (강제 2열 그리드) ===
     st.subheader(f"📌 {s['name']}")
-    cc = st.columns(2)
-    cc[0].metric("1회 매수금", f"${one_buy:.0f}")
-    if mode == 'reverse':
-        cc[1].metric("모드", "🔄 리버스")
-    else:
-        cc[1].metric("단계", phase_label(phase))
-
-    cc = st.columns(2)
-    cc[0].metric("진행도", f"{T:.2f}/{spl}T")
-    cc[1].metric("보유", f"{h}주")
-
-    cc = st.columns(2)
-    cc[0].metric("평단", f"${a:.2f}" if a else "-")
-    cc[1].metric("현재가", f"${cls:.2f}" if cls else "-")
-
-    cc = st.columns(2)
-    cc[0].metric("잔금", f"${cash:,.0f}")
-    cc[1].metric("운용 종목수", f"{len(active_slots())}개")
+    metric_grid([
+        ("1회 매수금", f"${one_buy:.0f}"),
+        ("🔄 모드" if mode == 'reverse' else "단계",
+         "리버스" if mode == 'reverse' else phase_label(phase)),
+        ("진행도", f"{T:.2f}/{spl}T"),
+        ("보유", f"{h}주"),
+        ("평단", f"${a:.2f}" if a else "-"),
+        ("현재가", f"${cls:.2f}" if cls else "-"),
+        ("잔금", f"${cash:,.0f}"),
+        ("운용 종목수", f"{len(active_slots())}개"),
+    ], columns=2)
 
 def render_reverse_orders(s, h, a, cash, cls):
     """리버스 모드 주문 가이드"""
