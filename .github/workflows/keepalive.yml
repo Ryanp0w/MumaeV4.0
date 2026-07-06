@@ -1,0 +1,25 @@
+name: Streamlit Keepalive
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # 6시간마다 (UTC 기준)
+  workflow_dispatch:         # 수동 실행 버튼도 추가
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Ping Mumae app
+        run: python scripts/keepalive.py
