@@ -644,26 +644,31 @@ def tab_portfolio(s):
 
     st.divider()
 
-    # === 2. 투자 수익률 (핵심 지표, 크게) ===
+    # === 2. 투자 수익률 / 손익 (핵심 지표, 둘 다 크게) ===
     pcolor = '#ef4444' if total_pct >= 0 else '#3b82f6'
     big_number("투자 수익률", f"{total_pct:+.2f}%", pcolor)
     st.markdown("<br>", unsafe_allow_html=True)
+    big_number("투자 손익", f"{total_profit:+.2f} USD", pcolor)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-    # === 3. 나머지 현황을 표 하나로 정리 ===
-    status_rows = [
-        {"항목": "투자 손익", "값": f"{total_profit:+.2f} USD"},
-        {"항목": "1회 매수금", "값": f"${one_buy:.0f}"},
-        {"항목": "모드" if mode == 'reverse' else "단계",
-         "값": "🔄 리버스" if mode == 'reverse' else phase_label(phase)},
-        {"항목": "진행도", "값": f"{T:.2f} / {spl}T"},
-        {"항목": "보유", "값": f"{h}주"},
-        {"항목": "평단", "값": f"${a:.2f}" if a else "-"},
-        {"항목": "현재가", "값": f"${cls:.2f}" if cls else "-"},
-        {"항목": "잔금", "값": f"${cash:,.0f}"},
-        {"항목": "운용 종목수", "값": f"{len(active_slots())}개"},
-    ]
+    # === 3. 나머지 현황 (3열 그리드) ===
     st.subheader(f"📌 {s['name']}")
-    st.dataframe(pd.DataFrame(status_rows), hide_index=True, width='stretch')
+    cc = st.columns(3)
+    cc[0].metric("1회 매수금", f"${one_buy:.0f}")
+    if mode == 'reverse':
+        cc[1].metric("모드", "🔄 리버스")
+    else:
+        cc[1].metric("단계", phase_label(phase))
+    cc[2].metric("진행도", f"{T:.2f}/{spl}T")
+
+    cc = st.columns(3)
+    cc[0].metric("보유", f"{h}주")
+    cc[1].metric("평단", f"${a:.2f}" if a else "-")
+    cc[2].metric("현재가", f"${cls:.2f}" if cls else "-")
+
+    cc = st.columns(3)
+    cc[0].metric("잔금", f"${cash:,.0f}")
+    cc[1].metric("운용 종목수", f"{len(active_slots())}개")
 
 def render_reverse_orders(s, h, a, cash, cls):
     """리버스 모드 주문 가이드"""
