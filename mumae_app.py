@@ -473,6 +473,16 @@ def big_number(label, value_str, color):
         unsafe_allow_html=True
     )
 
+def big_number_sm(label, value_str, color):
+    """2열 배치용 - 폰트 살짝 작게"""
+    st.markdown(
+        f"<div style='text-align: center; padding: 4px 0;'>"
+        f"<div style='font-size: 12px; color: #888; margin-bottom: 4px;'>{label}</div>"
+        f"<div style='font-size: 26px; font-weight: bold; color: {color}; line-height: 1.1;'>{value_str}</div>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+
 def trans_df(transactions):
     if not transactions:
         return pd.DataFrame()
@@ -644,11 +654,13 @@ def tab_portfolio(s):
 
     st.divider()
 
-    # === 2. 투자 수익률 / 손익 (핵심 지표, 둘 다 크게) ===
+    # === 2. 투자 수익률 / 손익 (핵심 지표, 2열) ===
     pcolor = '#ef4444' if total_pct >= 0 else '#3b82f6'
-    big_number("투자 수익률", f"{total_pct:+.2f}%", pcolor)
-    st.markdown("<br>", unsafe_allow_html=True)
-    big_number("투자 손익", f"{total_profit:+.2f} USD", pcolor)
+    cc = st.columns(2)
+    with cc[0]:
+        big_number_sm("투자 수익률", f"{total_pct:+.2f}%", pcolor)
+    with cc[1]:
+        big_number_sm("투자 손익", f"{total_profit:+.2f} USD", pcolor)
     st.markdown("<br>", unsafe_allow_html=True)
 
     # === 3. 나머지 현황 (2열 그리드) ===
