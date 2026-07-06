@@ -651,22 +651,24 @@ def tab_portfolio(s):
     big_number("투자 손익", f"{total_profit:+.2f} USD", pcolor)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # === 3. 나머지 현황 (3열 그리드) ===
+    # === 3. 나머지 현황 (2열 그리드) ===
     st.subheader(f"📌 {s['name']}")
-    cc = st.columns(3)
+    cc = st.columns(2)
     cc[0].metric("1회 매수금", f"${one_buy:.0f}")
     if mode == 'reverse':
         cc[1].metric("모드", "🔄 리버스")
     else:
         cc[1].metric("단계", phase_label(phase))
-    cc[2].metric("진행도", f"{T:.2f}/{spl}T")
 
-    cc = st.columns(3)
-    cc[0].metric("보유", f"{h}주")
-    cc[1].metric("평단", f"${a:.2f}" if a else "-")
-    cc[2].metric("현재가", f"${cls:.2f}" if cls else "-")
+    cc = st.columns(2)
+    cc[0].metric("진행도", f"{T:.2f}/{spl}T")
+    cc[1].metric("보유", f"{h}주")
 
-    cc = st.columns(3)
+    cc = st.columns(2)
+    cc[0].metric("평단", f"${a:.2f}" if a else "-")
+    cc[1].metric("현재가", f"${cls:.2f}" if cls else "-")
+
+    cc = st.columns(2)
     cc[0].metric("잔금", f"${cash:,.0f}")
     cc[1].metric("운용 종목수", f"{len(active_slots())}개")
 
