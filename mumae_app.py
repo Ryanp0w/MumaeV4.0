@@ -236,9 +236,11 @@ def calc_realized(transactions):
     return realized
 
 def calc_star_pct(T, ticker, split):
-    if ticker == 'TQQQ':
-        return 15 - 1.5 * T if split == 20 else 15 - 0.75 * T
-    return 20 - 2 * T if split == 20 else 20 - T
+    # 별% = base × (1 − 2T/N)  (base: TQQQ=15, SOXL/기타=20)
+    # 검증: N=20 SOXL→20−2T, N=40 SOXL→20−T, N=20 TQQQ→15−1.5T, N=40 TQQQ→15−0.75T
+    # 임의 분할수(예: 30)도 동일 공식으로 일반화 처리
+    base = 15 if ticker == 'TQQQ' else 20
+    return base * (1 - 2 * T / split) if split else 0
 
 def calc_one_buy(cash, T, split):
     d = split - T
@@ -277,7 +279,8 @@ def calc_extra_buy_tiers(base_price, target_budget, existing_cum_qty, num_tiers,
     return tiers
 
 def get_phase(T, split):
-    if T >= split - 1:
+    # 소진: T > N−1 (T=N−1은 아직 후반전). 리버스 전환조건(new_T > split−1)과 일관
+    if T > split - 1:
         return 'sojin'
     elif T >= split / 2:
         return 'late'
@@ -302,9 +305,9 @@ def fetch_reverse_star(ticker):
     return None
 
 def calc_reverse_sell_qty(holdings, split):
-    """리버스 매도수량 = 직전보유의 1/10(20분할) or 1/20(40분할), 내림"""
-    divisor = 10 if split == 20 else 20
-    return holdings // divisor
+    """리버스 매도수량 = 직전보유 ÷ (N/2), 내림 (20분할→1/10, 40분할→1/20, 30분할→1/15)"""
+    divisor = split // 2 if split else 1
+    return holdings // divisor if divisor else 0
 
 def is_first_reverse_sell(slot):
     """최근 리버스 진입 이후 첫 매도가 아직 없는지"""
@@ -338,8 +341,8 @@ def calc_reverse_T_buy(T, split):
     return T + (split - T) * 0.25
 
 def calc_reverse_T_sell(T, split):
-    """리버스 매도시 T값: T×0.9 (20분할) or T×0.95 (40분할)"""
-    return T * (0.9 if split == 20 else 0.95)
+    """리버스 매도시 T값: T × (1 − 2/N) (20분할→0.9, 40분할→0.95, 30분할→0.9333)"""
+    return T * (1 - 2 / split) if split else T
 
 # ==========================================
 # yfinance
@@ -611,6 +614,8 @@ def tab_portfolio(s):
     star_price = a * (1 + star_pct / 100) if a else 0
 
     # === 1. 오늘의 주문 (최상단) ===
+    if s['ticker'] not in ('TQQQ', 'SOXL'):
+        st.caption(f"ℹ️ 방법론은 TQQQ/SOXL 기준 — 이 티커({s['ticker']})는 SOXL(20%) 규칙으로 계산됨")
     if mode == 'reverse':
         st.subheader("🔄 리버스 모드 — 오늘의 주문")
         render_reverse_orders(s, h, a, cash, cls)
@@ -619,13 +624,18 @@ def tab_portfolio(s):
         if h == 0:
             st.markdown("**🚀 처음 매수**")
             if cls:
-                big = cls * 1.12
+                big = round(cls * 1.12, 2)
                 qty = int(one_buy // big) if big > 0 else 0
-                df = pd.DataFrame([{"구분": "LOC (+12%)", "가격": f"${big:.2f}", "수량": f"{qty}주"}])
-                st.dataframe(df, hide_index=True, width='stretch')
-                st.caption(f"종가 ${cls:.2f} 기준")
+                first_rows = [{"구분": "큰수매수 LOC (+12%)", "가격": f"${big:.2f}", "수량": f"{qty}주"}]
+                # 첫날 급락 대비: 큰수 아래로 하향 LOC 사다리(1회매수액 최대 소진)
+                extra_n = s.get('extra_buy_levels', 3)
+                extra_step = s.get('extra_buy_pct_step', 5.0)
+                for t in calc_extra_buy_tiers(big, one_buy, qty, extra_n, extra_step):
+                    first_rows.append({"구분": "하향 LOC 매수", "가격": f"${t['price']}", "수량": f"{t['qty']}주"})
+                st.dataframe(pd.DataFrame(first_rows), hide_index=True, width='stretch')
+                st.caption(f"종가 ${cls:.2f} 기준 · 1회매수액 ${one_buy:.2f}")
             else:
-                st.warning("종가 로드 실패. 수동으로 +10~15% 위에 LOC")
+                st.warning("종가 로드 실패. 수동으로 +10~15% 위에 LOC + 아래로 하향 LOC 사다리")
         else:
             bp = round(star_price - 0.01, 2)
             spct = 15 if s['ticker'] == 'TQQQ' else 20
@@ -721,7 +731,7 @@ def render_reverse_orders(s, h, a, cash, cls):
 
     # 매도
     sell_qty = calc_reverse_sell_qty(h, s['split'])
-    divisor = 10 if s['split'] == 20 else 20
+    divisor = s['split'] // 2 if s['split'] else 1
     if is_first:
         st.markdown("**💰 처음 매도** · MOC 무조건 체결")
         df = pd.DataFrame([{"구분": "MOC 매도", "가격": "시장가", "수량": f"{sell_qty}주"}])
