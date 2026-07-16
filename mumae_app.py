@@ -278,6 +278,19 @@ def calc_extra_buy_tiers(base_price, target_budget, existing_cum_qty, num_tiers,
             cum_qty += qty_here
     return tiers
 
+def resolve_top_buy_price(star_buy_price, close_price, big_pct=12.0, reject_pct=20.0):
+    """매수점 표의 최상단(★or큰수) 가격을 결정.
+    별지점(−0.01 적용가)이 현재가 대비 약 reject_pct%를 초과해 위에 있으면
+    증권사가 현재가 ±20% 초과 LOC 주문을 거부하는 것을 회피하기 위해
+    큰수매수(현재가 ×(1+big_pct%))로 대체한다(PDF1 5-6쪽 헤더 "★or큰수", 8쪽 큰수매수).
+    수량 배정은 호출부에서 배정액//사용가격으로 유지.
+    현재가 조회 실패 시 별지점을 그대로 유지(안전 폴백).
+    반환: (사용가격, 라벨)
+    """
+    if close_price and star_buy_price > close_price * (1 + reject_pct / 100):
+        return round(close_price * (1 + big_pct / 100), 2), '큰수매수'
+    return star_buy_price, '★ 별지점'
+
 def get_phase(T, split):
     # 소진: T > N−1 (T=N−1은 아직 후반전). 리버스 전환조건(new_T > split−1)과 일관
     if T > split - 1:
@@ -647,18 +660,20 @@ def tab_portfolio(s):
             extra_n = s.get('extra_buy_levels', 3)
             extra_step = s.get('extra_buy_pct_step', 5.0)
             buy_rows = []
+            # 별지점이 현재가 대비 20% 초과로 위에 있으면 큰수매수로 대체(증권사 주문거부 회피)
+            top_price, top_label = resolve_top_buy_price(bp, cls)
             if phase == 'early':
                 half = one_buy / 2
-                qs = int(half // bp) if bp > 0 else 0
+                qs = int(half // top_price) if top_price > 0 else 0
                 qa = int(half // a) if a > 0 else 0
-                buy_rows.append({"구분": "★ 별지점", "가격": f"${bp}", "수량": f"{qs}주"})
+                buy_rows.append({"구분": top_label, "가격": f"${top_price}", "수량": f"{qs}주"})
                 buy_rows.append({"구분": "평단", "가격": f"${a:.2f}", "수량": f"{qa}주"})
-                base_for_extra = min(bp, a) if a > 0 else bp
+                base_for_extra = min(top_price, a) if a > 0 else top_price
                 existing_cum = qs + qa
             elif phase == 'late':
-                qs = int(one_buy // bp) if bp > 0 else 0
-                buy_rows.append({"구분": "★ 별지점", "가격": f"${bp}", "수량": f"{qs}주"})
-                base_for_extra = bp
+                qs = int(one_buy // top_price) if top_price > 0 else 0
+                buy_rows.append({"구분": top_label, "가격": f"${top_price}", "수량": f"{qs}주"})
+                base_for_extra = top_price
                 existing_cum = qs
             else:
                 base_for_extra = None
