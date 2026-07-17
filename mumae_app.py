@@ -660,8 +660,31 @@ def tab_portfolio(s):
             extra_n = s.get('extra_buy_levels', 3)
             extra_step = s.get('extra_buy_pct_step', 5.0)
             buy_rows = []
-            # 별지점이 현재가 대비 20% 초과로 위에 있으면 큰수매수로 대체(증권사 주문거부 회피)
-            top_price, top_label = resolve_top_buy_price(bp, cls)
+            # 별지점이 현재가 대비 20% 초과로 위에 있으면 큰수매수로 대체(증권사 주문거부 회피).
+            # 이 경우에도 사용자가 원래 별지점 기준 매수표를 확인할 수 있도록 토글을 제공한다.
+            resolved_top_price, resolved_top_label = resolve_top_buy_price(bp, cls)
+            is_big_buy = resolved_top_label == '큰수매수'
+            if is_big_buy:
+                show_big_buy = st.toggle(
+                    "큰수매수 표 보기",
+                    value=True,
+                    key=f"show_big_buy_{s['id']}",
+                    help="끔: 원래 별지점 기준 매수표를 표시합니다."
+                )
+                if show_big_buy:
+                    top_price, top_label = resolved_top_price, resolved_top_label
+                    st.caption(
+                        f"주문거부 방지 큰수매수 ${resolved_top_price:.2f} 적용 중 "
+                        f"· 원래 별지점 매수 ${bp:.2f}"
+                    )
+                else:
+                    top_price, top_label = bp, '★ 별지점'
+                    st.caption(
+                        f"원래 별지점 매수표 표시 중 (${bp:.2f}) "
+                        f"· 큰수매수 기준 ${resolved_top_price:.2f}"
+                    )
+            else:
+                top_price, top_label = resolved_top_price, resolved_top_label
             if phase == 'early':
                 half = one_buy / 2
                 qs = int(half // top_price) if top_price > 0 else 0
